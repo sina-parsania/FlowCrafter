@@ -2,16 +2,17 @@
 
 Honest comparison of **CodeGraph** against the tools it was built to supersede:
 **codebase-memory-mcp** (Neo4j code graph), **graphify** (any-input knowledge graph),
-**qmd** (local markdown search), and **codebase-index** (the ProMom-local Python MCP).
+**qmd** (local markdown search), and **codebase-index** (a repo-local Python MCP).
 
 > Method: numbers for CodeGraph are measured on this machine (Apple Silicon, 8 cores)
-> against the real ProMom monorepo. Two competitors are live in the same session
+> against a real multi-project monorepo (five codebases: Python, TypeScript, Kotlin,
+> NestJS, Swift). Two competitors are live in the same session
 > (`codebase-index`, `qmd`) and were run head-to-head; the others are compared on
 > their documented capabilities. Gaps are called out, not hidden.
 
 ## 1. Live head-to-heads (same machine, same corpus)
 
-### a. Symbol definition lookup — `AuthService` in backend-app
+### a. Symbol definition lookup — `AuthService` in a NestJS backend
 
 | Tool           | Result                                                        | How                                                                               |
 | -------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------- |
@@ -41,23 +42,23 @@ Proven against a **real `scip-typescript` index**. No other tool here imports SC
 
 CodeGraph carries qmd's entire hybrid-search arsenal **and** applies it to code plus a code graph.
 
-## 2. Performance (measured, real ProMom repos)
+## 2. Performance (measured, real-world repos)
 
 ### Index build (full, cold)
 
-| Project                 | Files | Symbols | CodeGraph |
-| ----------------------- | ----- | ------- | --------- |
-| knowledge-rag (Py)      | 152   | 893     | **0.9s**  |
-| web-app (TS)            | 1,718 | 4,168   | **0.2s**  |
-| promom-android (Kotlin) | 613   | 4,425   | **0.2s**  |
-| backend-app (NestJS)    | 2,797 | 13,640  | **0.8s**  |
-| mobile-ios (Swift)      | 2,189 | 23,492  | **1.3s**  |
+| Codebase           | Files | Symbols | CodeGraph |
+| ------------------ | ----- | ------- | --------- |
+| Python service     | 152   | 893     | **0.9s**  |
+| TypeScript web app | 1,718 | 4,168   | **0.2s**  |
+| Kotlin app         | 613   | 4,425   | **0.2s**  |
+| NestJS backend     | 2,797 | 13,640  | **0.8s**  |
+| Swift iOS app      | 2,189 | 23,492  | **1.3s**  |
 
 Single static binary → SQLite. No server, no daemon. A Neo4j-backed graph
 (codebase-memory) pays network + server round-trips on every ingest and query;
 a ripgrep tool (codebase-index) skips the build but re-scans the tree on every call.
 
-### Query latency (backend-app, 13.6k nodes, cold process each call)
+### Query latency (NestJS backend, 13.6k nodes, cold process each call)
 
 | Query                                                                          | Latency     |
 | ------------------------------------------------------------------------------ | ----------- |
@@ -70,32 +71,32 @@ Every query opens the DB fresh and still returns in well under a tenth of a seco
 
 ✅ first-class · ➖ partial/indirect · ❌ absent
 
-| Capability                            |   CodeGraph    | codebase-memory | graphify |    qmd    | codebase-index |
-| ------------------------------------- | :------------: | :-------------: | :------: | :-------: | :------------: |
-| Multi-language code parsing           |   ✅ **13**    |       ✅        |    ➖    |    ❌     |  ➖ (3, grep)  |
-| AST-precise symbol defs               |       ✅       |       ✅        |    ❌    |    ❌     |   ❌ (grep)    |
-| Compiler-grade SCIP resolution        |       ✅       |       ❌        |    ❌    |    ❌     |       ❌       |
-| Call graph (callers/callees)          |       ✅       |       ✅        |    ❌    |    ❌     | ➖ (grep refs) |
-| Blast radius / impact                 |       ✅       |       ➖        |    ❌    |    ❌     |       ❌       |
-| Shortest-path trace                   |       ✅       |       ✅        |    ❌    |    ❌     |       ❌       |
-| Community detection (Louvain)         |       ✅       |       ❌        |    ❌    |    ❌     |       ❌       |
-| Centrality (PageRank + betweenness)   |       ✅       |       ❌        |    ❌    |    ❌     |       ❌       |
-| Inheritance / implements + hyperedges |       ✅       |       ➖        |    ❌    |    ❌     |       ❌       |
-| HTTP route extraction                 |       ✅       |       ❌        |    ❌    |    ❌     |       ✅       |
-| Arbitrary query language              |    ✅ (SQL)    |   ✅ (Cypher)   |    ❌    |    ❌     |       ❌       |
-| Full-text search                      |   ✅ (FTS5)    |       ➖        |    ➖    | ✅ (BM25) |  ✅ (ripgrep)  |
-| Semantic / vector search              |       ✅       |       ➖        |    ✅    |    ✅     |       ❌       |
-| HyDE search                           |       ✅       |       ❌        |    ➖    |    ✅     |       ❌       |
-| LLM rerank                            |       ✅       |       ❌        |    ➖    |    ✅     |       ❌       |
-| NL Q&A over source                    |       ✅       |       ❌        |    ➖    |    ❌     |       ❌       |
-| Doc ingest (PDF / web / text)         |       ✅       |       ❌        |    ✅    |  ➖ (md)  |       ❌       |
-| Image OCR ingest                      |       ✅       |       ❌        |    ✅    |    ❌     |       ❌       |
-| **Audio / video media ingest**        | ❌ _(roadmap)_ |       ❌        |    ✅    |    ❌     |       ❌       |
-| Optional local LLM (no key)           |       ✅       |       ❌        |    ✅    |    ➖     |       ❌       |
-| Incremental indexing (sha256)         |       ✅       |       ➖        |    ➖    |    ✅     |      n/a       |
-| Single static binary (no server)      |       ✅       |   ❌ (Neo4j)    |    ❌    |    ❌     |  ❌ (Python)   |
-| Standalone CLI **and** MCP            |       ✅       |    ➖ (MCP)     |    ➖    |    ✅     |    ➖ (MCP)    |
-| Project-agnostic                      |       ✅       |       ✅        |    ✅    |    ✅     |  ❌ (ProMom)   |
+| Capability                            |   CodeGraph    | codebase-memory | graphify |    qmd    |   codebase-index   |
+| ------------------------------------- | :------------: | :-------------: | :------: | :-------: | :----------------: |
+| Multi-language code parsing           |   ✅ **13**    |       ✅        |    ➖    |    ❌     |    ➖ (3, grep)    |
+| AST-precise symbol defs               |       ✅       |       ✅        |    ❌    |    ❌     |     ❌ (grep)      |
+| Compiler-grade SCIP resolution        |       ✅       |       ❌        |    ❌    |    ❌     |         ❌         |
+| Call graph (callers/callees)          |       ✅       |       ✅        |    ❌    |    ❌     |   ➖ (grep refs)   |
+| Blast radius / impact                 |       ✅       |       ➖        |    ❌    |    ❌     |         ❌         |
+| Shortest-path trace                   |       ✅       |       ✅        |    ❌    |    ❌     |         ❌         |
+| Community detection (Louvain)         |       ✅       |       ❌        |    ❌    |    ❌     |         ❌         |
+| Centrality (PageRank + betweenness)   |       ✅       |       ❌        |    ❌    |    ❌     |         ❌         |
+| Inheritance / implements + hyperedges |       ✅       |       ➖        |    ❌    |    ❌     |         ❌         |
+| HTTP route extraction                 |       ✅       |       ❌        |    ❌    |    ❌     |         ✅         |
+| Arbitrary query language              |    ✅ (SQL)    |   ✅ (Cypher)   |    ❌    |    ❌     |         ❌         |
+| Full-text search                      |   ✅ (FTS5)    |       ➖        |    ➖    | ✅ (BM25) |    ✅ (ripgrep)    |
+| Semantic / vector search              |       ✅       |       ➖        |    ✅    |    ✅     |         ❌         |
+| HyDE search                           |       ✅       |       ❌        |    ➖    |    ✅     |         ❌         |
+| LLM rerank                            |       ✅       |       ❌        |    ➖    |    ✅     |         ❌         |
+| NL Q&A over source                    |       ✅       |       ❌        |    ➖    |    ❌     |         ❌         |
+| Doc ingest (PDF / web / text)         |       ✅       |       ❌        |    ✅    |  ➖ (md)  |         ❌         |
+| Image OCR ingest                      |       ✅       |       ❌        |    ✅    |    ❌     |         ❌         |
+| **Audio / video media ingest**        | ❌ _(roadmap)_ |       ❌        |    ✅    |    ❌     |         ❌         |
+| Optional local LLM (no key)           |       ✅       |       ❌        |    ✅    |    ➖     |         ❌         |
+| Incremental indexing (sha256)         |       ✅       |       ➖        |    ➖    |    ✅     |        n/a         |
+| Single static binary (no server)      |       ✅       |   ❌ (Neo4j)    |    ❌    |    ❌     |    ❌ (Python)     |
+| Standalone CLI **and** MCP            |       ✅       |    ➖ (MCP)     |    ➖    |    ✅     |      ➖ (MCP)      |
+| Project-agnostic                      |       ✅       |       ✅        |    ✅    |    ✅     | ❌ (repo-specific) |
 
 ## 4. Where CodeGraph is #1
 
@@ -110,7 +111,7 @@ Every query opens the DB fresh and still returns in well under a tenth of a seco
 
 - **Audio/video media ingest** (graphify has it) — CodeGraph ships **image OCR** today; audio (whisper) + video (ffmpeg keyframes) are the gated `media` feature's next expansion. The seam exists.
 - **Dedicated data-flow / cross-service _call_ tracing** (codebase-memory advertises modes for these) — CodeGraph offers `routes` + arbitrary SQL + shortest-path tracing, which cover the practical questions, but not a purpose-built data-flow analyzer yet.
-- **ProMom-specific helpers** (codebase-index: `find_migration_for_column`, 5-repo `monorepo_overview`) — deliberately out of scope; CodeGraph is project-agnostic. The same answers come from `query` + per-repo indexing.
+- **Repo-specific helpers** (codebase-index: `find_migration_for_column`, multi-repo `monorepo_overview`) — deliberately out of scope; CodeGraph is project-agnostic. The same answers come from `query` + per-repo indexing.
 
 **Bottom line:** CodeGraph is a strict superset of qmd and codebase-index, and beats
 codebase-memory on languages, precision (SCIP), analytics, speed, and deployment. The

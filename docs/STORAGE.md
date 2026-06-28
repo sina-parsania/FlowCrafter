@@ -47,7 +47,7 @@ A shared/concurrent project must never skew results or produce false positives. 
 independent mechanisms guarantee this:
 
 1. **Deterministic build** — the same commit produces a byte-identical graph. Verified
-   empirically on the 13.6k-node backend-app: two full re-indexes yield identical
+   empirically on a 13.6k-node NestJS backend: two full re-indexes yield identical
    node + **community-id** + edge hashes. Parsing order is stable (rayon `collect` preserves
    input order), and Louvain / PageRank / betweenness iterate in node-index order with no
    RNG. → 20 devs indexing the same commit get the same graph.
