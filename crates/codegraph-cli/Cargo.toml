@@ -19,6 +19,7 @@ codegraph-ingest.workspace = true
 codegraph-resolve.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 walkdir.workspace = true
 ignore.workspace = true

@@ -3,6 +3,7 @@
 
 mod index;
 mod query;
+mod registry;
 
 use std::path::PathBuf;
 
@@ -57,6 +58,20 @@ enum Command {
     Routes {
         #[arg(long, default_value = ".")]
         path: PathBuf,
+    },
+    /// Reclaim disk: delete `.codegraph/` graphs of projects idle past the TTL
+    /// (CODEGRAPH_TTL_DAYS, default 30). Runs opportunistically on every command;
+    /// this forces it now.
+    Gc {
+        /// Idle days before a graph is reclaimed (overrides CODEGRAPH_TTL_DAYS).
+        #[arg(long)]
+        ttl_days: Option<u64>,
+        /// Remove ALL registered graphs regardless of age.
+        #[arg(long)]
+        all: bool,
+        /// Show what would be removed without deleting.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Run a READ-ONLY SQL query against the graph (arbitrary analytics).
     Query {
@@ -129,8 +144,33 @@ enum Command {
     },
 }
 
+/// The project root a command operates on (for TTL bookkeeping), if any.
+fn project_path(cmd: &Command) -> Option<PathBuf> {
+    use Command::*;
+    match cmd {
+        Index { path, .. } | Search { path, .. } | Trace { path, .. } | Impact { path, .. }
+        | Callees { path, .. } | Routes { path, .. } | Query { path, .. } | Communities { path, .. }
+        | Important { path, .. } | Implementers { path, .. } | Callers { path, .. } | Ask { path, .. }
+        | SemanticIndex { path, .. } | Semantic { path, .. } | Ingest { path, .. } | Mcp { path, .. } => {
+            Some(path.clone())
+        }
+        Install { .. } | Status | Doctor | Gc { .. } => None,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+    let cmd = Cli::parse().command;
+    // Opportunistic TTL housekeeping: stamp this project as used + reclaim graphs
+    // of projects untouched within CODEGRAPH_TTL_DAYS. Best-effort, never blocks.
+    let root = project_path(&cmd);
+    let db = root.as_ref().map(|p| index::db_path(p));
+    registry::housekeeping(
+        root.as_deref()
+            .zip(db.as_deref())
+            .map(|(r, d)| (r, d, matches!(cmd, Command::Index { .. }))),
+    );
+
+    match cmd {
         Command::Status => {
             let cfg = Config::load(&std::env::current_dir()?)?;
             let store = codegraph_store::Store::open_in_memory()?;
@@ -242,6 +282,25 @@ fn main() -> anyhow::Result<()> {
             }
             for n in routes {
                 println!("{:<28} {}:{}", n.name, n.file_path, n.line_start);
+            }
+        }
+        Command::Gc { ttl_days, all, dry_run } => {
+            let ttl = ttl_days.map(|d| d.saturating_mul(86_400));
+            let report = registry::run_gc(ttl, all, dry_run);
+            if report.removed.is_empty() {
+                println!("nothing to reclaim — all indexed graphs are within the TTL");
+            } else {
+                let verb = if dry_run { "would free" } else { "freed" };
+                println!(
+                    "{} {} graph(s), {}{}",
+                    verb,
+                    report.removed.len(),
+                    registry::human_bytes(report.freed_bytes),
+                    if dry_run { " (dry-run)" } else { "" }
+                );
+                for (root, bytes) in &report.removed {
+                    println!("  {}  ({})", root, registry::human_bytes(*bytes));
+                }
             }
         }
         Command::Query { sql, path, limit } => {

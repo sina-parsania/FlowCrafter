@@ -50,8 +50,18 @@ codegraph callers handleLogin   /   codegraph callees parseFile
 codegraph implementers Repository     # who implements/extends it
 codegraph trace router handler        # shortest dependency path
 codegraph ingest ./docs/guide.pdf     # ingest a PDF / URL / json / yaml / csv / log / image as Document nodes
+codegraph gc                          # reclaim graphs of projects idle past the TTL
+codegraph gc --all --dry-run          # preview reclaiming every indexed graph
 codegraph doctor      /   codegraph install   /   codegraph mcp
 ```
+
+### Auto-reclaim (TTL)
+
+The graph is a rebuildable cache. CodeGraph keeps a tiny registry of indexed projects
+(`~/.config/codegraph/registry.json`) and, opportunistically on each run (at most hourly),
+deletes the `.codegraph/` graph of any project **not used within the TTL** — so abandoned
+indexes don't pile up. "Used" = indexed **or** queried, so an active project is never reclaimed.
+Default **30 days**; set `CODEGRAPH_TTL_DAYS` (`0` disables). Force it with `codegraph gc`.
 
 ### Custom ignore file
 
