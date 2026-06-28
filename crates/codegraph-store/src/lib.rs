@@ -63,6 +63,7 @@ impl Store {
                id TEXT PRIMARY KEY, name TEXT, label TEXT, language TEXT, file_path TEXT,
                line_start INTEGER, line_end INTEGER, community INTEGER, pagerank REAL,
                betweenness REAL, data TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
              CREATE TABLE IF NOT EXISTS edges(
                src TEXT, dst TEXT, relation TEXT, tier TEXT, confidence TEXT,
                src_file TEXT, src_line INTEGER, data TEXT NOT NULL,
@@ -356,11 +357,11 @@ impl Store {
 
     pub fn save_calls(&self, file_path: &str, calls: &[RawCall]) -> Result<()> {
         self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO calls(caller_id, callee_name, line, file_path) VALUES(?1, ?2, ?3, ?4)",
+        )?;
         for c in calls {
-            self.conn.execute(
-                "INSERT INTO calls(caller_id, callee_name, line, file_path) VALUES(?1, ?2, ?3, ?4)",
-                params![c.caller_id, c.callee_name, c.line, file_path],
-            )?;
+            stmt.execute(params![c.caller_id, c.callee_name, c.line, file_path])?;
         }
         Ok(())
     }
@@ -398,12 +399,12 @@ impl Store {
 
     pub fn save_inherits(&self, file_path: &str, items: &[RawInherit]) -> Result<()> {
         self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO inherits(impl_name, super_name, kind, file_path) VALUES(?1, ?2, ?3, ?4)",
+        )?;
         for it in items {
             let kind = match it.kind { InheritKind::Extends => "Extends", InheritKind::Implements => "Implements" };
-            self.conn.execute(
-                "INSERT INTO inherits(impl_name, super_name, kind, file_path) VALUES(?1, ?2, ?3, ?4)",
-                params![it.impl_name, it.super_name, kind, file_path],
-            )?;
+            stmt.execute(params![it.impl_name, it.super_name, kind, file_path])?;
         }
         Ok(())
     }
@@ -436,6 +437,46 @@ impl Store {
             out.push(serde_json::from_str(&r?)?);
         }
         Ok(out)
+    }
+
+    pub fn begin(&self) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        Ok(())
+    }
+
+    pub fn commit(&self) -> Result<()> {
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    pub fn bulk_upsert_nodes(&self, nodes: &[Node]) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO nodes(id,name,label,language,file_path,line_start,line_end,community,pagerank,betweenness,data)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+             ON CONFLICT(id) DO UPDATE SET name=?2,label=?3,language=?4,file_path=?5,line_start=?6,line_end=?7,community=?8,pagerank=?9,betweenness=?10,data=?11",
+        )?;
+        for n in nodes {
+            let data = serde_json::to_string(n)?;
+            let label = enum_str(&n.label)?;
+            stmt.execute(params![n.id, n.name, label, n.language, n.file_path, n.line_start, n.line_end, n.community, n.pagerank, n.betweenness, data])?;
+        }
+        Ok(())
+    }
+
+    pub fn bulk_upsert_edges(&self, edges: &[Edge]) -> Result<()> {
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO edges(src,dst,relation,tier,confidence,src_file,src_line,data) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(src,dst,relation) DO UPDATE SET tier=?4,confidence=?5,src_file=?6,src_line=?7,data=?8",
+        )?;
+        for e in edges {
+            let data = serde_json::to_string(e)?;
+            stmt.execute(params![e.src, e.dst, enum_str(&e.relation)?, enum_str(&e.tier)?, enum_str(&e.confidence)?, e.src_file, e.src_line, data])?;
+        }
+        Ok(())
+    }
+
+    pub fn edge_count(&self) -> Result<i64> {
+        Ok(self.conn.query_row("SELECT count(*) FROM edges", [], |r| r.get(0))?)
     }
 
     pub fn node_count(&self) -> Result<i64> {

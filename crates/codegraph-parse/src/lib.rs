@@ -51,6 +51,7 @@ fn spec_for_ext(ext: &str) -> Option<&'static LangSpec> {
         "ts" | "mts" | "cts" => &TS,
         "tsx" => &TSX,
         "go" => &GO,
+        "kt" | "kts" => &KOTLIN,
         "swift" => &SWIFT,
         "java" => &JAVA,
         "c" | "h" => &C,
@@ -72,6 +73,7 @@ pub fn parse_tsx(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&TSX, p, 
 pub fn parse_go(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&GO, p, r, s) }
 pub fn parse_swift(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&SWIFT, p, r, s) }
 pub fn parse_java(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&JAVA, p, r, s) }
+pub fn parse_kotlin(p: &str, r: &str, s: &str) -> ParsedFile { parse_with(&KOTLIN, p, r, s) }
 
 static RUST: LangSpec = LangSpec { name: "rust", language: || tree_sitter_rust::LANGUAGE.into(), label_for: rust_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(rust_inherits) };
 static PYTHON: LangSpec = LangSpec { name: "python", language: || tree_sitter_python::LANGUAGE.into(), label_for: python_label, call_kinds: &["call"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: Some(py_inherits) };
@@ -85,6 +87,7 @@ static C: LangSpec = LangSpec { name: "c", language: || tree_sitter_c::LANGUAGE.
 static CPP: LangSpec = LangSpec { name: "cpp", language: || tree_sitter_cpp::LANGUAGE.into(), label_for: cpp_label, call_kinds: &["call_expression"], callee_fields: &["function"], name_mode: NameMode::CDeclarator, inherit_fn: None };
 static RUBY: LangSpec = LangSpec { name: "ruby", language: || tree_sitter_ruby::LANGUAGE.into(), label_for: ruby_label, call_kinds: &["call"], callee_fields: &["method"], name_mode: NameMode::Field, inherit_fn: None };
 static CSHARP: LangSpec = LangSpec { name: "csharp", language: || tree_sitter_c_sharp::LANGUAGE.into(), label_for: csharp_label, call_kinds: &["invocation_expression"], callee_fields: &["function"], name_mode: NameMode::Field, inherit_fn: None };
+static KOTLIN: LangSpec = LangSpec { name: "kotlin", language: || tree_sitter_kotlin_ng::LANGUAGE.into(), label_for: kotlin_label, call_kinds: &["call_expression"], callee_fields: &[], name_mode: NameMode::Field, inherit_fn: None };
 static BASH: LangSpec = LangSpec { name: "bash", language: || tree_sitter_bash::LANGUAGE.into(), label_for: bash_label, call_kinds: &[], callee_fields: &[], name_mode: NameMode::Field, inherit_fn: None };
 
 fn rust_label(k: &str) -> Option<NodeLabel> {
@@ -120,6 +123,14 @@ fn ruby_label(k: &str) -> Option<NodeLabel> {
 }
 fn csharp_label(k: &str) -> Option<NodeLabel> {
     match k { "method_declaration" | "constructor_declaration" => Some(NodeLabel::Method), "class_declaration" | "record_declaration" | "struct_declaration" => Some(NodeLabel::Class), "interface_declaration" => Some(NodeLabel::Interface), "enum_declaration" => Some(NodeLabel::Enum), _ => None }
+}
+fn kotlin_label(k: &str) -> Option<NodeLabel> {
+    // tree-sitter-kotlin parses class/interface/object/enum as class_declaration/object_declaration.
+    match k {
+        "function_declaration" => Some(NodeLabel::Function),
+        "class_declaration" | "object_declaration" => Some(NodeLabel::Class),
+        _ => None,
+    }
 }
 fn bash_label(k: &str) -> Option<NodeLabel> {
     match k { "function_definition" => Some(NodeLabel::Function), _ => None }
@@ -444,6 +455,17 @@ mod tests {
         assert!(java.inherits.iter().any(|i| i.impl_name == "B" && i.super_name == "A" && i.kind == InheritKind::Extends));
         let rust = parse_rust("p", "a.rs", "struct Foo;\ntrait Show {}\nimpl Show for Foo {}\n");
         assert!(rust.inherits.iter().any(|i| i.impl_name == "Foo" && i.super_name == "Show" && i.kind == InheritKind::Implements));
+    }
+
+
+    #[test]
+    fn kotlin_defs_and_calls() {
+        let pf = parse_kotlin("p", "A.kt", "fun greet() { say() }\nfun say() {}\nclass Vm {}\ninterface Service {}\nobject Singleton {}\n");
+        assert!(has(&pf, "greet", NodeLabel::Function));
+        assert!(has(&pf, "Vm", NodeLabel::Class));
+        assert!(has(&pf, "Service", NodeLabel::Class));
+        assert!(has(&pf, "Singleton", NodeLabel::Class));
+        assert!(pf.calls.iter().any(|c| c.callee_name == "say" && c.caller_id.ends_with("greet")));
     }
 
     #[test]

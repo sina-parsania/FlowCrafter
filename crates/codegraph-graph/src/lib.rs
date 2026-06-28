@@ -313,7 +313,7 @@ impl LoadedGraph {
 
     /// Top-k most central nodes by PageRank (deterministic id tiebreaker).
     pub fn pagerank_top(&self, k: usize) -> Vec<(String, f64)> {
-        let ranks = petgraph::algo::page_rank::page_rank(&self.graph, 0.85_f64, 50);
+        let ranks = self.page_rank();
         let mut scored: Vec<(String, f64)> = self
             .ids
             .iter()
@@ -331,7 +331,7 @@ impl LoadedGraph {
     /// over the whole graph; persisted onto each node at index time.
     pub fn analyze(&self) -> HashMap<String, (u32, f64, f64)> {
         let comm = self.communities();
-        let ranks = petgraph::algo::page_rank::page_rank(&self.graph, 0.85_f64, 50);
+        let ranks = self.page_rank();
         let betw = self.betweenness();
         let mut out = HashMap::new();
         for (i, id) in self.ids.iter().enumerate() {
@@ -345,6 +345,44 @@ impl LoadedGraph {
             );
         }
         out
+    }
+
+    /// O((V+E) * iters) PageRank (petgraph's is O(V^2)/iter). Index = node index.
+    fn page_rank(&self) -> Vec<f64> {
+        let n = self.graph.node_count();
+        if n == 0 {
+            return Vec::new();
+        }
+        let mut out: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for &ni in self.idx.values() {
+            let i = ni.index();
+            for nb in self.graph.neighbors(ni) {
+                out[i].push(nb.index());
+            }
+        }
+        let d = 0.85;
+        let base = (1.0 - d) / n as f64;
+        let mut rank = vec![1.0 / n as f64; n];
+        for _ in 0..50 {
+            let mut next = vec![base; n];
+            let mut dangling = 0.0;
+            for (i, outs) in out.iter().enumerate() {
+                if outs.is_empty() {
+                    dangling += rank[i];
+                    continue;
+                }
+                let share = d * rank[i] / outs.len() as f64;
+                for &j in outs {
+                    next[j] += share;
+                }
+            }
+            let dang = d * dangling / n as f64;
+            for x in next.iter_mut() {
+                *x += dang;
+            }
+            rank = next;
+        }
+        rank
     }
 
     /// Deterministic one-level Louvain (modularity local-moving); edges treated
@@ -411,10 +449,21 @@ impl LoadedGraph {
         out
     }
 
-    /// Brandes betweenness centrality (exact for graphs up to 1500 nodes,
-    /// else seeded evenly-spaced pivots for an approximation).
+    /// Brandes betweenness centrality. Exact for graphs up to 1500 nodes;
+    /// above that, a bounded set of evenly-spaced seeded pivots (reusing all
+    /// buffers across pivots). Skipped (all zero) for pathologically large graphs.
     pub fn betweenness(&self) -> HashMap<String, f64> {
         let n = self.graph.node_count();
+        let mut out = HashMap::new();
+        if n == 0 {
+            return out;
+        }
+        if n > 200_000 {
+            for id in &self.ids {
+                out.insert(id.clone(), 0.0);
+            }
+            return out;
+        }
         let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
         for &ni in self.idx.values() {
             let i = ni.index();
@@ -422,20 +471,30 @@ impl LoadedGraph {
                 adj[i].push(nb.index());
             }
         }
-        let sources: Vec<usize> = if n <= 1500 {
+        let pivots: Vec<usize> = if n <= 1500 {
             (0..n).collect()
         } else {
-            (0..n).step_by((n / 500).max(1)).collect()
+            let k = 128usize.min(n);
+            (0..n).step_by((n / k).max(1)).collect()
         };
         let mut bc = vec![0.0f64; n];
-        for &s in &sources {
-            let mut stack = Vec::new();
-            let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
-            let mut sigma = vec![0.0f64; n];
+        let mut pred: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut sigma = vec![0.0f64; n];
+        let mut dist = vec![-1i64; n];
+        let mut delta = vec![0.0f64; n];
+        let mut stack: Vec<usize> = Vec::with_capacity(n);
+        let mut q = std::collections::VecDeque::new();
+        for &s in &pivots {
+            for pp in pred.iter_mut() {
+                pp.clear();
+            }
+            sigma.iter_mut().for_each(|x| *x = 0.0);
+            dist.iter_mut().for_each(|x| *x = -1);
+            delta.iter_mut().for_each(|x| *x = 0.0);
+            stack.clear();
+            q.clear();
             sigma[s] = 1.0;
-            let mut dist = vec![-1i64; n];
             dist[s] = 0;
-            let mut q = std::collections::VecDeque::new();
             q.push_back(s);
             while let Some(v) = q.pop_front() {
                 stack.push(v);
@@ -450,7 +509,6 @@ impl LoadedGraph {
                     }
                 }
             }
-            let mut delta = vec![0.0f64; n];
             while let Some(w) = stack.pop() {
                 for &v in &pred[w] {
                     delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
@@ -460,7 +518,6 @@ impl LoadedGraph {
                 }
             }
         }
-        let mut out = HashMap::new();
         for (id, &b) in self.ids.iter().zip(&bc) {
             out.insert(id.clone(), b);
         }
