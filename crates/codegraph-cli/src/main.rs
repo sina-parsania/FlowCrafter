@@ -87,6 +87,12 @@ enum Command {
     },
     /// Health check: languages, schema, and local-LLM availability.
     Doctor,
+    /// Ingest a PDF, text/markdown file, or web URL as searchable Document nodes.
+    Ingest {
+        input: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+    },
     /// Configure this tool as an MCP server for Claude Code (and print config for others).
     Install {
         /// Only print the config; do not write any files.
@@ -319,6 +325,33 @@ fn main() -> anyhow::Result<()> {
                 Some(llm) => println!("local LLM:  available  ({} / {})", llm.provider(), llm.model()),
                 None => println!("local LLM:  not detected  (search + graph work fully offline; LM Studio/Ollama enables `ask`)"),
             }
+        }
+        Command::Ingest { input, path } => {
+            let chunks = codegraph_ingest::ingest(&input).map_err(anyhow::Error::msg)?;
+            let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            for (i, ch) in chunks.iter().enumerate() {
+                let safe: String = ch.source.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+                let mut meta = codegraph_core::Metadata::new();
+                meta.insert("text".to_string(), serde_json::json!(ch.text));
+                meta.insert("content_type".to_string(), serde_json::json!(ch.content_type));
+                let title: String = ch.text.lines().next().unwrap_or(&ch.source).chars().take(60).collect();
+                let node = codegraph_core::Node {
+                    id: format!("doc.{}.{}", safe, i),
+                    label: codegraph_core::NodeLabel::Document,
+                    name: if title.trim().is_empty() { format!("{} #{}", ch.source, i) } else { title },
+                    file_path: ch.source.clone(),
+                    line_start: 1,
+                    line_end: 1,
+                    language: ch.content_type.clone(),
+                    metadata: meta,
+                    community: None,
+                    pagerank: 0.0,
+                    betweenness: 0.0,
+                };
+                store.upsert_node(&node)?;
+            }
+            store.rebuild_fts()?;
+            println!("ingested {} chunk(s) from {} as Document nodes (searchable by title; semantic over content)", chunks.len(), input);
         }
         Command::Install { print, repo } => {
             let repo = repo.canonicalize().unwrap_or(repo);
