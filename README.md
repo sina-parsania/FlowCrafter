@@ -2,13 +2,14 @@
 
 A single static binary that turns **any codebase** into a queryable code-knowledge graph for AI agents — over **MCP** (Claude Code, Cursor, …) and from a **standalone CLI**. Project-agnostic, local-only, no API key required. An optional local LLM (LM Studio / MLX / Ollama, or a cloud key) adds natural-language Q&A and semantic search — everything degrades gracefully with no model running.
 
-> **v1.2 — production-grade.** 13 languages, cross-file resolution, incremental indexing, Louvain communities + betweenness, inheritance/hyperedges, HTTP route extraction, full-text + semantic search, doc/image ingestion, an MCP server with 9 tools. Indexes real large repos fast — the 23k-symbol, 2,189-file iOS app in **1.3s**. 36 tests, zero clippy warnings.
+> **v1.3 — production-grade.** 13 languages, cross-file resolution, **compiler-grade SCIP import**, incremental indexing, Louvain communities + betweenness, inheritance/hyperedges, HTTP route extraction, full-text + semantic search, doc/image ingestion, an MCP server with 9 tools. Indexes real large repos fast — the 23k-symbol, 2,189-file iOS app in **1.3s**. 38 tests, zero clippy warnings.
 
 ## Features
 
 - **13 languages** — Rust, Python, JavaScript, TypeScript, Go, **Swift**, **Kotlin**, Java, C, C++, Ruby, C#, Bash. One grammar-driven parser.
 - **The graph** — `File / Function / Method / Class / Enum / Interface / Type / Module / Route / Document` nodes joined by `DEFINES`, `CALLS`, `INHERITS`, `IMPLEMENTS` edges, plus **IMPLEMENTS hyperedges**.
 - **Honest cross-file resolution** — calls resolve in-file first, then to a project-wide unique name; ambiguous names stay unlinked (no phantom edges, no cross-language calls).
+- **Compiler-grade SCIP import** — merge a `.scip` (scip-typescript, rust-analyzer, scip-java, scip-python, …) for **Tier-A precise edges** that resolve what heuristics can't — overloads, re-exports, ambiguous names. Auto-detected at the repo root; supersedes the tree-sitter edge for the same pair.
 - **Fast & incremental** — respects `.gitignore` + a custom `.codegraphignore`; prunes dependency/build dirs; sha-256 manifest skips unchanged files; parallel parsing; single-transaction prepared bulk writes; O(V+E) PageRank. Real ProMom projects index in <1.4s.
 - **Graph intelligence** — `trace`, `impact` (blast-radius), `callers` / `callees`, `implementers`, `important` (PageRank), `communities` (Louvain), `routes`.
 - **Search** — full-text (`search`, optional `--rerank`), **semantic** vector search (`semantic`, `--hyde`), and `ask` (NL answer over real source snippets).
@@ -32,6 +33,7 @@ Prebuilt binaries (macOS arm64/x64, Linux x64/arm64, Windows x64) are built by C
 
 ```bash
 codegraph index .                    # incremental index → .codegraph/graph.db  (--full to force)
+codegraph index . --scip index.scip  # + merge compiler-grade SCIP edges (Tier-A; auto-detected if present)
 codegraph search UserService --rerank
 codegraph semantic "retry with backoff" --hyde
 codegraph ask "how does auth work?"
@@ -71,12 +73,11 @@ Auto-detected, first reachable wins: **LM Studio** (`:1234`, MLX) → **mlx-lm/m
 
 ## Architecture
 
-Cargo workspace: `codegraph-core` · `codegraph-parse` (tree-sitter, 13 langs, routes) · `codegraph-graph` (cross-file resolution, Louvain, betweenness, PageRank, hyperedges) · `codegraph-store` (SQLite + FTS5 + vectors + zst) · `codegraph-llm` (provider registry) · `codegraph-ingest` (PDF/web/text/image) · `codegraph-mcp` · `codegraph-cli`.
+Cargo workspace: `codegraph-core` · `codegraph-parse` (tree-sitter, 13 langs, routes) · `codegraph-graph` (cross-file resolution, Louvain, betweenness, PageRank, hyperedges) · `codegraph-resolve` (SCIP import → Tier-A edges) · `codegraph-store` (SQLite + FTS5 + vectors + zst) · `codegraph-llm` (provider registry) · `codegraph-ingest` (PDF/web/text/image) · `codegraph-mcp` · `codegraph-cli`.
 
 ## Roadmap (gated; the core never depends on these)
 
 - **Audio/video media ingest** (whisper transcription, ffmpeg keyframes) — the `media` feature's next expansion; image OCR ships today.
-- **SCIP import** (compiler-grade resolution) — needs a generated `.scip` + symbol mapping; the `ResolutionTier::Scip` seam exists, today's resolver is tree-sitter scoped + unique-name.
 
 ## License
 

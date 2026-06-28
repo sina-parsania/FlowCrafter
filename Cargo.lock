@@ -339,7 +339,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codegraph-cli"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -349,6 +349,7 @@ dependencies = [
  "codegraph-llm",
  "codegraph-mcp",
  "codegraph-parse",
+ "codegraph-resolve",
  "codegraph-store",
  "ignore",
  "rayon",
@@ -360,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-core"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -370,14 +371,14 @@ dependencies = [
 
 [[package]]
 name = "codegraph-embed"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "codegraph-core",
 ]
 
 [[package]]
 name = "codegraph-graph"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "codegraph-core",
  "codegraph-parse",
@@ -387,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-ingest"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "codegraph-core",
  "html2text",
@@ -398,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-llm"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "codegraph-core",
  "reqwest",
@@ -407,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-mcp"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "anyhow",
  "codegraph-core",
@@ -423,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "codegraph-parse"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "codegraph-core",
  "serde_json",
@@ -445,21 +446,24 @@ dependencies = [
 
 [[package]]
 name = "codegraph-query"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "codegraph-core",
 ]
 
 [[package]]
 name = "codegraph-resolve"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
+ "anyhow",
  "codegraph-core",
+ "protobuf",
+ "scip",
 ]
 
 [[package]]
 name = "codegraph-store"
-version = "1.2.0"
+version = "1.3.0"
 dependencies = [
  "codegraph-core",
  "rusqlite",
@@ -1628,6 +1632,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "protobuf"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d65a1d4ddae7d8b5de68153b48f6aa3bba8cb002b243dbdbc55a5afbc98f99f4"
+dependencies = [
+ "once_cell",
+ "protobuf-support",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "protobuf-support"
+version = "3.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e36c2f31e0a47f9280fb347ef5e461ffcd2c52dd520d8e216b52f93b0b0d7d6"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2054,6 +2078,15 @@ dependencies = [
  "quote",
  "serde_derive_internals",
  "syn 2.0.118",
+]
+
+[[package]]
+name = "scip"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46becf967b98a434bf7f19c8be30ca74bff57702ea7ef6af3628cbf52f57be0"
+dependencies = [
+ "protobuf",
 ]
 
 [[package]]

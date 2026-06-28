@@ -27,6 +27,10 @@ enum Command {
         /// Force a full re-index (ignore the sha256 manifest).
         #[arg(long)]
         full: bool,
+        /// Merge a compiler-grade SCIP index for Tier-A precise edges.
+        /// Defaults to `index.scip` (or any `*.scip`) found at the repo root.
+        #[arg(long)]
+        scip: Option<PathBuf>,
     },
     /// Full-text search the indexed graph for a term.
     Search {
@@ -131,16 +135,17 @@ fn main() -> anyhow::Result<()> {
                 cfg.llm.model,
             );
         }
-        Command::Index { path, full } => {
+        Command::Index { path, full, scip } => {
             let db = index::db_path(&path);
-            let stats = index::index_dir(&path, &db, full)?;
+            let stats = index::index_dir(&path, &db, full, scip.as_deref())?;
             println!(
-                "indexed {} files ({} changed{}) → {} nodes, {} edges  ({})",
+                "indexed {} files ({} changed{}) → {} nodes, {} edges{}  ({})",
                 stats.files,
                 stats.changed,
                 if stats.pruned > 0 { format!(", {} pruned", stats.pruned) } else { String::new() },
                 stats.nodes,
                 stats.edges,
+                if stats.scip_edges > 0 { format!(" (+{} SCIP tier-A)", stats.scip_edges) } else { String::new() },
                 db.display()
             );
         }

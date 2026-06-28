@@ -2,12 +2,12 @@
 //! rebuild edges from the full persisted graph (so cross-file edges stay correct).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use codegraph_graph::{build, LoadedGraph};
 use codegraph_parse::parse_file;
-use codegraph_core::Node;
+use codegraph_core::{Edge, EdgeRelation, Node};
 use codegraph_store::Store;
 use sha2::{Digest, Sha256};
 use ignore::WalkBuilder;
@@ -36,13 +36,14 @@ pub struct IndexStats {
     pub pruned: usize,
     pub nodes: usize,
     pub edges: usize,
+    pub scip_edges: usize,
 }
 
 pub fn db_path(root: &Path) -> std::path::PathBuf {
     root.join(".codegraph").join("graph.db")
 }
 
-pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
+pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Result<IndexStats> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -122,7 +123,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
     // Rebuild ALL edges from the full persisted node + call set (keeps
     // cross-file CALLS correct after a partial update).
     // Nothing changed and not a forced full rebuild: the graph is already current.
-    if changed == 0 && pruned == 0 && !full {
+    if changed == 0 && pruned == 0 && !full && scip_path(root, scip).is_none() {
         store.commit()?;
         return Ok(IndexStats {
             files,
@@ -130,6 +131,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
             pruned,
             nodes: store.node_count()? as usize,
             edges: store.edge_count()? as usize,
+            scip_edges: 0,
         });
     }
 
@@ -137,15 +139,17 @@ pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
     let calls = store.all_calls()?;
     let inherits = store.all_inherits()?;
     let built = build(&nodes, &calls, &inherits);
+    let mut edges = built.edges;
+    let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
     store.clear_edges()?;
-    store.bulk_upsert_edges(&built.edges)?;
+    store.bulk_upsert_edges(&edges)?;
     store.clear_hyperedges()?;
     for (h, members) in &built.hyperedges {
         store.upsert_hyperedge(h, members)?;
     }
 
     // Community + centrality over the full graph, persisted onto each node.
-    let lg = LoadedGraph::load(&nodes, &built.edges);
+    let lg = LoadedGraph::load(&nodes, &edges);
     let analytics = lg.analyze();
     let mut nodes = nodes;
     for nd in nodes.iter_mut() {
@@ -159,7 +163,40 @@ pub fn index_dir(root: &Path, db: &Path, full: bool) -> Result<IndexStats> {
     store.rebuild_fts()?;
     store.commit()?;
 
-    Ok(IndexStats { files, changed, pruned, nodes: nodes.len(), edges: built.edges.len() })
+    Ok(IndexStats { files, changed, pruned, nodes: nodes.len(), edges: edges.len(), scip_edges })
+}
+
+/// Locate a `.scip` index: explicit path, else `index.scip`, else any `*.scip` at root.
+fn scip_path(root: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = explicit {
+        return p.exists().then(|| p.to_path_buf());
+    }
+    let cand = root.join("index.scip");
+    if cand.exists() {
+        return Some(cand);
+    }
+    std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "scip"))
+}
+
+/// Merge compiler-grade SCIP edges in: they supersede the tree-sitter edge for
+/// the same (src, dst, relation) and add precise edges tree-sitter missed.
+fn merge_scip_edges(root: &Path, explicit: Option<&Path>, nodes: &[Node], edges: &mut Vec<Edge>) -> usize {
+    let Some(path) = scip_path(root, explicit) else { return 0 };
+    let Ok(bytes) = std::fs::read(&path) else { return 0 };
+    let Ok(scip) = codegraph_resolve::import_scip(&bytes, nodes) else { return 0 };
+    if scip.is_empty() {
+        return 0;
+    }
+    let superseded: HashSet<(String, String, EdgeRelation)> =
+        scip.iter().map(|e| (e.src.clone(), e.dst.clone(), e.relation)).collect();
+    edges.retain(|e| !superseded.contains(&(e.src.clone(), e.dst.clone(), e.relation)));
+    let n = scip.len();
+    edges.extend(scip);
+    n
 }
 
 fn sha256(s: &str) -> String {
