@@ -320,7 +320,7 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
         }
     }
 
-    if ctx.spec.call_kinds.contains(&node.kind()) {
+    if ctx.spec.call_kinds.contains(&node.kind()) && !is_subscript(node, src) {
         if let Some(callee) = callee_name(node, src, ctx.spec.callee_fields) {
             if is_http_method(&callee) {
                 if let Some(path) = first_string_arg(node, src) {
@@ -419,6 +419,19 @@ fn classify_receiver(recv: &str) -> Receiver {
 /// for `obj.method()` shapes across all grammars: Java's explicit `object` field,
 /// the `function` field (TS/JS/Python/Rust/Go/C#), or the first non-argument child
 /// (Swift). The class `self`/`this` is bound to is supplied separately (enclosing_class).
+/// tree-sitter-swift models `arr[i]` subscripts as a `call_expression` whose
+/// argument-suffix uses `[...]` instead of `(...)`. Those are NOT method calls —
+/// detect them by the bracket so we never emit a phantom edge for a subscript.
+fn is_subscript(call: TsNode, src: &[u8]) -> bool {
+    for i in 0..call.child_count() as u32 {
+        let Some(ch) = call.child(i) else { continue };
+        if matches!(ch.kind(), "call_suffix" | "value_arguments" | "arguments" | "argument_list") {
+            return node_str(ch, src).map(|t| t.trim_start().starts_with('[')).unwrap_or(false);
+        }
+    }
+    false
+}
+
 fn first_callee(call: TsNode<'_>) -> Option<TsNode<'_>> {
     if let Some(f) = call.child_by_field_name("function") {
         return Some(f);
@@ -582,13 +595,26 @@ fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
             }
         }
     }
-    // Fallback: rightmost child yielding an identifier — handles member/navigation
-    // chains whose parts are unnamed (Swift navigation_expression/navigation_suffix).
-    for i in (0..node.child_count() as u32).rev() {
-        let Some(c) = node.child(i) else { continue };
-        if c.id() != node.id() && !c.is_extra() {
-            if let Some(s) = trailing_ident(c, src) {
-                return Some(s);
+    // Fallback: descend ONLY member/navigation chains whose parts are unnamed
+    // (Swift navigation_expression/navigation_suffix). Restricted to these kinds
+    // so we never dig into a closure/block body and invent a phantom callee from
+    // an IIFE `{ … return x }()` or a call argument.
+    if matches!(
+        k,
+        "navigation_expression"
+            | "navigation_suffix"
+            | "member_expression"
+            | "field_expression"
+            | "selector_expression"
+            | "member_access_expression"
+            | "scoped_identifier"
+    ) {
+        for i in (0..node.child_count() as u32).rev() {
+            let Some(c) = node.child(i) else { continue };
+            if c.id() != node.id() && !c.is_extra() {
+                if let Some(s) = trailing_ident(c, src) {
+                    return Some(s);
+                }
             }
         }
     }
@@ -692,5 +718,23 @@ mod tests {
     #[test]
     fn unknown_extension_is_empty() {
         assert!(parse_file("p", "a.unknown", "stuff").nodes.is_empty());
+    }
+
+    #[test]
+    fn swift_subscript_is_not_a_call() {
+        // tree-sitter-swift models `arr[i]` as a call_expression with a `[]`
+        // suffix — those are subscripts, not method calls (no phantom edge).
+        let pf = parse_swift("p", "a.swift", "class A {\n  func go() {\n    let x = arr[0]\n    cell.configure(with: rows[i])\n  }\n}");
+        assert!(!pf.calls.iter().any(|c| c.callee_name == "arr"), "arr[0] subscript is not a call");
+        assert!(!pf.calls.iter().any(|c| c.callee_name == "rows"), "rows[i] subscript is not a call");
+        assert!(pf.calls.iter().any(|c| c.callee_name == "configure"), "configure(...) IS a call");
+    }
+
+    #[test]
+    fn swift_iife_closure_invents_no_callee() {
+        // `static let f: X = { … return formatter }()` is an immediately-invoked
+        // closure — it must NOT mint a call to the closure's last identifier.
+        let pf = parse_swift("p", "a.swift", "class A {\n  static let f: X = {\n    let formatter = Y()\n    return formatter\n  }()\n}");
+        assert!(!pf.calls.iter().any(|c| c.callee_name == "formatter"), "IIFE body must not become a callee");
     }
 }

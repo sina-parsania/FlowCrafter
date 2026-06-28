@@ -77,22 +77,34 @@ caches, same metric (`… FROM edges WHERE relation='Calls'`):
 
 | Corpus               | resolved CALLS edges (before → after) | what carried it                                            |
 | -------------------- | ------------------------------------- | ---------------------------------------------------------- |
-| NestJS backend (TS)  | 8,751 → **10,667**                    | T1 self/this + T3 DI fields (`this.service.method()`)      |
-| iOS app (Swift)      | 9,711 → **18,244** (+88%)             | a dropped-call parse fix + T1 self/this + T4 global-unique |
-| Android app (Kotlin) | 3,199 → **4,112**                     | same parse fix + T1 this                                   |
+| NestJS backend (TS)  | 8,751 → **10,602**                    | T1 self/this + T3 DI fields (`this.service.method()`)      |
+| iOS app (Swift)      | 9,711 → **17,872** (+84%)             | a dropped-call parse fix + T1 self/this + T4 global-unique |
+| Android app (Kotlin) | 3,199 → **4,104**                     | same parse fix + T1 this                                   |
 
 Every new edge is **provably correct**: T1 (`self.m()` → the enclosing class's `m`, unique-or-drop),
 T3 (`this.field.m()` → the field's declared type, unique-or-drop), or T4 (globally-unique name). A
 **qualified call on a named variable never guesses a same-file member** — it resolves only if the name is
 globally unique, else it drops. Determinism holds (two full builds byte-identical).
 
-### The Swift parse fix (why +88%)
+### The Swift parse fix (why +84%)
 
 tree-sitter-swift exposes a method call's callee (`navigation_expression` holding `self.foo`) as an
 **unnamed** child, and the callee extractor only scanned _named_ children — so `self.method()` /
 `obj.method()` calls were **dropped at parse time** and never entered the graph. Scanning all children +
-a rightmost-identifier fallback recovered them (the iOS corpus went 38k → 115k captured calls), and the
-receiver-aware tiers then resolved them precisely. This was a latent recall bug, not just a missing tier.
+a restricted rightmost-identifier fallback recovered them (the iOS corpus went 38k → 115k captured calls),
+and the receiver-aware tiers then resolved them precisely. A latent recall bug, not just a missing tier.
+
+### Precision audit (4,500 edges, 3 languages)
+
+Sampled 1,500 resolved edges each from Swift, TS, and Kotlin and cross-checked every one against the
+source line: **99.4–99.9% of resolved edges have the call to the resolved method present at that line**,
+and **every residual was a confirmed audit false-negative** — a real call my matcher's window missed
+(multi-line QueryBuilder chains, Compose `Modifier.clickable {}` trailing-closures, optional `?.()`
+calls, Ruby `name!`/Python `__dunder__`). **Zero genuine phantom edges.** The audit also surfaced two
+real phantom-edge sources, both fixed + regression-tested:
+
+- **Swift subscripts** — tree-sitter-swift models `arr[i]` as a `call_expression` with a `[…]` suffix; guarded by bracket so a subscript never becomes a "call to `arr`".
+- **IIFE closures** — `static let f = { … return x }()` no longer mints a phantom call to the closure body's last identifier (`x`); the rightmost-ident fallback is restricted to member/navigation chains.
 
 ## Expected recall for the remaining phases (RANGES — confirm with counters)
 
