@@ -23,13 +23,37 @@ pub fn ingest(arg: &str) -> Result<Vec<DocChunk>, String> {
             let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
             Ok(chunk(&text, "text", arg))
         }
-        Some("mp3") | Some("wav") | Some("m4a") | Some("mp4") | Some("mov") | Some("png")
-        | Some("jpg") | Some("jpeg") | Some("webp") => Err(format!(
-            "media ingest ({}) requires a build with `--features media` (ffmpeg/whisper/tesseract)",
+        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("bmp") | Some("tiff")
+        | Some("tif") | Some("gif") => ingest_image_arm(p),
+        Some("mp3") | Some("wav") | Some("m4a") | Some("mp4") | Some("mov") => Err(format!(
+            "audio/video ingest ({}) requires a build with `--features media` (ffmpeg/whisper) - roadmap",
             arg
         )),
         _ => Err(format!("unsupported ingest input: {} (pdf, txt/md, or http(s) url)", arg)),
     }
+}
+
+#[cfg(feature = "media")]
+fn ingest_image_arm(p: &Path) -> Result<Vec<DocChunk>, String> {
+    ingest_image(p)
+}
+
+#[cfg(not(feature = "media"))]
+fn ingest_image_arm(p: &Path) -> Result<Vec<DocChunk>, String> {
+    Err(format!("image OCR requires a build with `--features media` (tesseract): {}", p.display()))
+}
+
+/// OCR an image via tesseract into a Document chunk (media feature).
+#[cfg(feature = "media")]
+pub fn ingest_image(path: &Path) -> Result<Vec<DocChunk>, String> {
+    let p = path.to_str().ok_or("non-utf8 path")?;
+    let text = tesseract::Tesseract::new(None, Some("eng"))
+        .map_err(|e| e.to_string())?
+        .set_image(p)
+        .map_err(|e| e.to_string())?
+        .get_text()
+        .map_err(|e| e.to_string())?;
+    Ok(chunk(&text, "image", &path.to_string_lossy()))
 }
 
 pub fn ingest_pdf(path: &Path) -> Result<Vec<DocChunk>, String> {
