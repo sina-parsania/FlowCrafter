@@ -58,6 +58,14 @@ enum Command {
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Run a READ-ONLY SQL query against the graph (arbitrary analytics).
+    Query {
+        sql: String,
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
     /// List the largest code communities (clusters) detected in the graph.
     Communities {
         #[arg(long, default_value = ".")]
@@ -234,6 +242,14 @@ fn main() -> anyhow::Result<()> {
             }
             for n in routes {
                 println!("{:<28} {}:{}", n.name, n.file_path, n.line_start);
+            }
+        }
+        Command::Query { sql, path, limit } => {
+            let db = index::db_path(&path);
+            let (cols, rows) = codegraph_store::query_readonly(&db, &sql, limit)?;
+            println!("{}", cols.join(" | "));
+            for row in rows {
+                println!("{}", row.join(" | "));
             }
         }
         Command::Communities { path, limit } => {

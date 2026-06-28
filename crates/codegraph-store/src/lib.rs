@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use codegraph_core::{Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawInherit};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -501,6 +501,40 @@ fn enum_str<T: serde::Serialize>(v: &T) -> Result<String> {
     }
 }
 
+/// Run an arbitrary READ-ONLY SQL query against the graph database. The
+/// connection is opened read-only, so writes (INSERT/UPDATE/DELETE/DROP) fail
+/// at the engine. Returns (column names, rows-as-strings), capped at `limit`.
+pub fn query_readonly(db: &Path, sql: &str, limit: usize) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(sql)?;
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let ncol = cols.len();
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        if out.len() >= limit {
+            break;
+        }
+        let mut row = Vec::with_capacity(ncol);
+        for i in 0..ncol {
+            row.push(value_ref_to_string(r.get_ref(i)?));
+        }
+        out.push(row);
+    }
+    Ok((cols, out))
+}
+
+fn value_ref_to_string(v: rusqlite::types::ValueRef<'_>) -> String {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(i) => i.to_string(),
+        ValueRef::Real(f) => f.to_string(),
+        ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+        ValueRef::Blob(_) => "<blob>".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +617,17 @@ mod tests {
         let db2 = dir.path().join("g2.db");
         let s2 = Store::import_zst(&zst, &db2).unwrap();
         assert_eq!(s2.get_node("x").unwrap().unwrap().name, "x");
+    }
+
+    #[test]
+    fn query_readonly_reads_and_blocks_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("g.db");
+        Store::open(&db).unwrap().upsert_node(&node("x")).unwrap();
+        let (cols, rows) = query_readonly(&db, "SELECT COUNT(*) AS n FROM nodes", 10).unwrap();
+        assert_eq!(cols, vec!["n"]);
+        assert_eq!(rows[0][0], "1");
+        assert!(query_readonly(&db, "DELETE FROM nodes", 10).is_err());
     }
 
     #[test]
