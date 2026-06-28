@@ -577,6 +577,22 @@ mod traversal_tests {
     }
 
     #[test]
+    fn analyze_is_deterministic() {
+        // Same graph analyzed twice must be byte-identical (community + centrality),
+        // or two developers indexing the same commit would get different results.
+        let (nodes, edges) = fixture();
+        let a = LoadedGraph::load(&nodes, &edges).analyze();
+        let b = LoadedGraph::load(&nodes, &edges).analyze();
+        assert_eq!(a.len(), b.len());
+        for (id, va) in &a {
+            let vb = b.get(id).expect("same node set");
+            assert_eq!(va.0, vb.0, "community id must be stable for {id}");
+            assert_eq!(va.1.to_bits(), vb.1.to_bits(), "pagerank must be bit-identical for {id}");
+            assert_eq!(va.2.to_bits(), vb.2.to_bits(), "betweenness must be bit-identical for {id}");
+        }
+    }
+
+    #[test]
     fn callees_and_pagerank() {
         let (nodes, edges) = fixture();
         let lg = LoadedGraph::load(&nodes, &edges);

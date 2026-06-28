@@ -51,6 +51,11 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "mmap_size", 268_435_456i64)?;
+        // Concurrent MCP sessions may open several project DBs; wait briefly on a
+        // writer rather than erroring with SQLITE_BUSY. Keep temp + cache in RAM.
+        conn.pragma_update(None, "busy_timeout", 5000i64)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        conn.pragma_update(None, "cache_size", -65536i64)?;
         let store = Store { conn };
         store.migrate()?;
         Ok(store)
@@ -375,6 +380,13 @@ impl Store {
     }
 
     pub fn delete_file_data(&self, file_path: &str) -> Result<()> {
+        // Prune embeddings for this file's nodes BEFORE the nodes go (vectors are
+        // keyed by node_id, not file_path) — otherwise renamed/removed symbols
+        // leave orphaned vectors that pollute semantic search and grow the DB.
+        self.conn.execute(
+            "DELETE FROM vectors WHERE node_id IN (SELECT id FROM nodes WHERE file_path = ?1)",
+            [file_path],
+        )?;
         self.conn.execute("DELETE FROM nodes WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM calls WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
@@ -617,6 +629,16 @@ mod tests {
         let db2 = dir.path().join("g2.db");
         let s2 = Store::import_zst(&zst, &db2).unwrap();
         assert_eq!(s2.get_node("x").unwrap().unwrap().name, "x");
+    }
+
+    #[test]
+    fn delete_file_data_prunes_vectors() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_node(&node("sym")).unwrap();
+        s.upsert_vector("sym", &[0.1, 0.2, 0.3]).unwrap();
+        assert_eq!(s.all_vectors().unwrap().len(), 1);
+        s.delete_file_data("f.rs").unwrap();
+        assert_eq!(s.all_vectors().unwrap().len(), 0, "embeddings must be pruned with their file's nodes");
     }
 
     #[test]

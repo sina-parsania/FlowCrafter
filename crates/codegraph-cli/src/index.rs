@@ -61,6 +61,13 @@ pub fn db_path(root: &Path) -> std::path::PathBuf {
 pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>) -> Result<IndexStats> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)?;
+        // The graph is a per-checkout artifact: never commit/share it, or a
+        // teammate on another branch queries a graph that doesn't match their
+        // tree (false positives). Self-ignore the whole .codegraph/ dir.
+        let gitignore = parent.join(".gitignore");
+        if !gitignore.exists() {
+            let _ = std::fs::write(&gitignore, "# CodeGraph index — per-checkout, do not commit\n*\n");
+        }
     }
     let store = Store::open(db)?;
     store.begin()?;

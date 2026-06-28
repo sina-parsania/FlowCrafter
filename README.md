@@ -13,9 +13,10 @@ A single static binary that turns **any codebase** into a queryable code-knowled
 - **Fast & incremental** — respects `.gitignore` + a custom `.codegraphignore`; prunes dependency/build dirs; sha-256 manifest skips unchanged files; parallel parsing; single-transaction prepared bulk writes; O(V+E) PageRank. Real ProMom projects index in <1.4s.
 - **Graph intelligence** — `trace`, `impact` (blast-radius), `callers` / `callees`, `implementers`, `important` (PageRank), `communities` (Louvain), `routes`.
 - **Search** — full-text (`search`, optional `--rerank`), **semantic** vector search (`semantic`, `--hyde`), and `ask` (NL answer over real source snippets).
-- **Ingest** — `ingest` pulls PDFs, text/markdown, web pages, and (with `--features media`) **images via OCR**.
+- **Any-input** — `index` auto-ingests prose docs + localization (md/rst/txt/`.strings`/po/xliff/…) as searchable **Document** nodes in the same pass as code. `ingest` additionally pulls PDFs, web pages, and any text/data file (json/jsonl/yaml/toml/csv/xml/html/log/sql/…), plus (with `--features media`) **images via OCR**. One graph holds code + docs + config + localization.
 - **MCP server** — `search, semantic_search, get_node, callers, callees, trace_path, blast_radius, important, stats` over stdio.
 - **Arbitrary analytics** — `query` runs read-only SQL over the graph (a universal alternative to a graph query language).
+- **Team-safe** — the build is **deterministic** (same commit → byte-identical graph, community ids included) and the index is **per-checkout** (auto-gitignored, never shared), so a 20-dev project never serves stale or false-positive results. WAL snapshot reads + atomic single-transaction indexing. Storage rationale: [docs/STORAGE.md](docs/STORAGE.md).
 
 See **[docs/BENCHMARK.md](docs/BENCHMARK.md)** for a measured head-to-head vs qmd, graphify, codebase-memory, and codebase-index — feature parity matrix + perf + honest gaps.
 
@@ -48,7 +49,7 @@ codegraph impact processPayment       # blast-radius
 codegraph callers handleLogin   /   codegraph callees parseFile
 codegraph implementers Repository     # who implements/extends it
 codegraph trace router handler        # shortest dependency path
-codegraph ingest ./docs/guide.pdf     # ingest a PDF/markdown/URL/image as Document nodes
+codegraph ingest ./docs/guide.pdf     # ingest a PDF / URL / json / yaml / csv / log / image as Document nodes
 codegraph doctor      /   codegraph install   /   codegraph mcp
 ```
 
