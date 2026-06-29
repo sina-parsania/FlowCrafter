@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub type Metadata = HashMap<String, serde_json::Value>;
+/// Ordered map so JSON serialization is canonical (sorted keys) — required for
+/// the byte-identical-graph determinism guarantee. `BTreeMap` is a drop-in for
+/// the `new`/`insert`/`get` surface used across the codebase.
+pub type Metadata = BTreeMap<String, serde_json::Value>;
 
 /// What a graph node represents. `Concept` is LLM-only (never produced on the
 /// `--no-llm` path); `Image`/`Figure` are NOT LLM-only (they always carry at

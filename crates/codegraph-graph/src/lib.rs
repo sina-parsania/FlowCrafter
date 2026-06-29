@@ -141,11 +141,14 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields:
         // T1 self/this -> enclosing class; T3 this.field.method() -> the field's
         // declared type's class. Everything else falls back to the existing
         // same-file / project-wide-unique path (no regression).
-        let receiver_resolved = match &c.receiver {
+        // Each resolution carries a `justification` tag = the tier that resolved
+        // it (the precision proof obligation + per-tier measurement surface).
+        let receiver_resolved: Option<(&str, &'static str)> = match &c.receiver {
             Receiver::SelfThis => c
                 .enclosing_class
                 .as_deref()
-                .and_then(|cls| resolve_member(cls, &c.callee_name, &class_members, &class_parents)),
+                .and_then(|cls| resolve_member(cls, &c.callee_name, &class_members, &class_parents))
+                .map(|id| (id, "SelfThisMember")),
             Receiver::Field(field) => c
                 .enclosing_class
                 .as_deref()
@@ -154,28 +157,32 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields:
                     Some(ids) if ids.len() == 1 => Some(ids[0]),
                     _ => None,
                 })
-                .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents)),
+                .and_then(|type_cls| resolve_member(type_cls, &c.callee_name, &class_members, &class_parents))
+                .map(|id| (id, "FieldTypeMember")),
             _ => None,
         };
         let global_unique = || match fn_by_name.get(c.callee_name.as_str()) {
             Some(cands) if cands.len() == 1 => Some(cands[0]),
             _ => None,
         };
-        let resolved = receiver_resolved.or_else(|| match &c.receiver {
+        let resolved: Option<(&str, &'static str)> = receiver_resolved.or_else(|| match &c.receiver {
             // Unqualified `foo()`: same-file scope is reasonable, then global-unique.
             Receiver::Bare => fn_by_file_name
                 .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
                 .copied()
-                .or_else(global_unique),
+                .map(|id| (id, "SameFileUnique"))
+                .or_else(|| global_unique().map(|id| (id, "GlobalUnique"))),
             // Qualified call we couldn't type (named var / super / dropped self or
             // field): only a globally-unique name is provably correct — never guess
             // a same-file member of an unknown receiver type.
-            _ => global_unique(),
+            _ => global_unique().map(|id| (id, "GlobalUnique")),
         });
-        if let Some(callee_id) = resolved {
+        if let Some((callee_id, justification)) = resolved {
             if callee_id == c.caller_id {
                 continue;
             }
+            let mut metadata = Metadata::new();
+            metadata.insert("justification".to_string(), serde_json::Value::String(justification.to_string()));
             push_edge(&mut edges, &mut seen, Edge {
                 src: c.caller_id.clone(),
                 dst: callee_id.to_string(),
@@ -184,7 +191,7 @@ pub fn build(nodes: &[Node], calls: &[RawCall], inherits: &[RawInherit], fields:
                 confidence: Confidence::Inferred,
                 src_file: caller.file_path.clone(),
                 src_line: c.line,
-                metadata: Metadata::new(),
+                metadata,
             });
         }
     }
@@ -317,6 +324,27 @@ mod tests {
             fields.extend(pf.fields);
         }
         build(&nodes, &calls, &inherits, &fields)
+    }
+
+    #[test]
+    fn every_call_edge_carries_a_justification_tag() {
+        // Proof-obligation invariant (docs/RESOLUTION.md): no CALLS edge without a
+        // justification — the per-tier measurement + precision-audit surface.
+        let built = build_ts(&[
+            ("a.ts", "class A { foo() { this.bar(); } bar() {} }"),
+            ("b.ts", "class B { run() { helper(); } }\nfunction helper() {}"),
+        ]);
+        let call_edges: Vec<_> = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls).collect();
+        assert!(!call_edges.is_empty());
+        for e in &call_edges {
+            let tag = e.metadata.get("justification").and_then(|v| v.as_str());
+            assert!(tag.is_some(), "CALLS edge {}->{} has no justification tag", e.src, e.dst);
+            assert!(
+                ["SelfThisMember", "FieldTypeMember", "SameFileUnique", "GlobalUnique"].contains(&tag.unwrap()),
+                "unexpected justification tag: {:?}",
+                tag
+            );
+        }
     }
 
     #[test]
