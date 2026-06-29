@@ -1,6 +1,6 @@
-//! MCP server (M6): exposes the code graph to AI agents over stdio. Tools:
-//! `search`, `get_node`, `callers`, `stats`. The whole CLI is the standalone
-//! package; `codegraph mcp` runs this server as one subcommand.
+//! MCP server: exposes the code graph to AI agents over stdio (search, callers,
+//! callees, trace_path, blast_radius, context, important, implementers, routes,
+//! semantic_search, get_node, stats). The graph is cached + auto-reindexed.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,11 @@ pub fn mcp_ready() -> bool {
     true
 }
 
+/// The built call graph + its node list — expensive to construct, so cached.
+type GraphSnapshot = (codegraph_graph::LoadedGraph, Vec<codegraph_core::Node>);
+/// Mtime-keyed cache of the built graph, shared across cloned server handles.
+type GraphCache = std::sync::Arc<std::sync::Mutex<Option<(std::time::SystemTime, std::sync::Arc<GraphSnapshot>)>>>;
+
 #[derive(Clone)]
 pub struct CodeGraphServer {
     db_path: PathBuf,
@@ -26,6 +31,9 @@ pub struct CodeGraphServer {
     refresh: Option<fn(&Path) -> anyhow::Result<()>>,
     /// Debounce so a burst of tool calls in one agent turn re-checks at most once/sec.
     last_fresh: std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Built-graph cache keyed by the DB's mtime — so a burst of graph queries in
+    /// one agent turn builds the petgraph ONCE, not per call. Invalidates on reindex.
+    graph_cache: GraphCache,
     tool_router: ToolRouter<CodeGraphServer>,
 }
 
@@ -90,6 +98,7 @@ impl CodeGraphServer {
             root,
             refresh,
             last_fresh: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            graph_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
@@ -148,11 +157,28 @@ impl CodeGraphServer {
         }))?]))
     }
 
-    fn load_graph(&self) -> Result<(codegraph_graph::LoadedGraph, Vec<codegraph_core::Node>), McpError> {
-        let store = self.open()?;
+    /// Build (or reuse) the call graph. Cached by the DB mtime: a burst of graph
+    /// queries in one agent turn rebuilds the petgraph once; a reindex bumps the
+    /// mtime and invalidates it. Returns a shared snapshot (cheap to clone).
+    fn load_graph(&self) -> Result<std::sync::Arc<GraphSnapshot>, McpError> {
+        self.maybe_refresh();
+        let mtime = std::fs::metadata(&self.db_path).and_then(|m| m.modified()).ok();
+        if let (Some(mt), Ok(cache)) = (mtime, self.graph_cache.lock()) {
+            if let Some((cached_mt, snap)) = cache.as_ref() {
+                if *cached_mt == mt {
+                    return Ok(snap.clone());
+                }
+            }
+        }
+        let store = codegraph_store::Store::open(&self.db_path)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let nodes = store.all_nodes().map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let edges = store.all_edges().map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok((codegraph_graph::LoadedGraph::load(&nodes, &edges), nodes))
+        let snap = std::sync::Arc::new((codegraph_graph::LoadedGraph::load(&nodes, &edges), nodes));
+        if let (Some(mt), Ok(mut cache)) = (mtime, self.graph_cache.lock()) {
+            *cache = Some((mt, snap.clone()));
+        }
+        Ok(snap)
     }
 
     #[tool(description = "Find symbols by MEANING rather than exact name (vector search). Use when you do not know the symbol name. Needs a local embedding model + a prior `codegraph semantic-index`; degrades gracefully if unavailable.")]
@@ -169,7 +195,8 @@ impl CodeGraphServer {
 
     #[tool(description = "Shortest dependency/call path between two symbols by name: how A reaches B through the call graph.")]
     async fn trace_path(&self, args: Parameters<TwoNamesArgs>) -> Result<CallToolResult, McpError> {
-        let (lg, nodes) = self.load_graph()?;
+        let g = self.load_graph()?;
+        let (lg, nodes) = (&g.0, &g.1);
         let find = |name: &str| nodes.iter().find(|n| n.name == name).map(|n| n.id.clone());
         let path = match (find(&args.0.from), find(&args.0.to)) {
             (Some(a), Some(b)) => lg.shortest_path(&a, &b).unwrap_or_default(),
@@ -180,7 +207,8 @@ impl CodeGraphServer {
 
     #[tool(description = "Impact / blast-radius: every symbol that (transitively) depends on the given one. Use BEFORE changing or renaming a symbol to see what could break. Includes a `coverage` object — if `may_be_incomplete` is true the radius may miss callers whose calls were dropped; corroborate with text search.")]
     async fn blast_radius(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
-        let (lg, nodes) = self.load_graph()?;
+        let g = self.load_graph()?;
+        let (lg, nodes) = (&g.0, &g.1);
         let store = self.open()?;
         let (affected, coverage) = match nodes.iter().find(|n| n.name == args.0.name) {
             Some(n) => (
@@ -199,7 +227,8 @@ impl CodeGraphServer {
 
     #[tool(description = "List the functions a given function CALLS (outgoing call edges). PREFER over reading the body to enumerate its calls. Includes a `coverage` object — `dropped` counts external/unresolved calls absent from the list.")]
     async fn callees(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
-        let (lg, nodes) = self.load_graph()?;
+        let g = self.load_graph()?;
+        let (lg, nodes) = (&g.0, &g.1);
         let store = self.open()?;
         let (out, coverage) = match nodes.iter().find(|n| n.name == args.0.name) {
             Some(n) => (
@@ -232,7 +261,8 @@ impl CodeGraphServer {
         let fts = if fts.is_empty() { args.0.query.clone() } else { fts };
         let seeds: Vec<String> =
             store.search_fts(&fts, 12).unwrap_or_default().into_iter().map(|n| n.id).collect();
-        let (lg, nodes) = self.load_graph()?;
+        let g = self.load_graph()?;
+        let (lg, nodes) = (&g.0, &g.1);
         let ranked = lg.personalized_pagerank_top(&seeds, 200);
         let mut used = 0usize;
         let mut out = Vec::new();
@@ -258,7 +288,8 @@ impl CodeGraphServer {
 
     #[tool(description = "The most central/important symbols by PageRank: a fast way to map the core of an unfamiliar codebase.")]
     async fn important(&self, args: Parameters<LimitArgs>) -> Result<CallToolResult, McpError> {
-        let (lg, _) = self.load_graph()?;
+        let g = self.load_graph()?;
+        let lg = &g.0;
         let top = lg.pagerank_top(args.0.limit.unwrap_or(15));
         Ok(CallToolResult::success(vec![Content::json(top)?]))
     }
@@ -270,6 +301,25 @@ impl CodeGraphServer {
             .node_count()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::json(serde_json::json!({ "nodes": n }))?]))
+    }
+
+    #[tool(description = "List the types that IMPLEMENT or EXTEND a given interface/class/protocol (by name). Use to find every concrete implementation of an abstraction before changing it.")]
+    async fn implementers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
+        let store = self.open()?;
+        let impls = store
+            .implementers_of(&args.0.name)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::json(impls)?]))
+    }
+
+    #[tool(description = "List the HTTP routes/endpoints detected in the repo (NestJS/Express/Flask/Spring/etc.), each with method + path + handler. Use to map a backend's API surface.")]
+    async fn routes(&self) -> Result<CallToolResult, McpError> {
+        let store = self.open()?;
+        let mut routes = store
+            .nodes_by_label("Route")
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        routes.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(CallToolResult::success(vec![Content::json(routes)?]))
     }
 }
 
@@ -299,7 +349,7 @@ impl ServerHandler for CodeGraphServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
-            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `context` to assemble the symbols relevant to a task (personalized PageRank over the resolved graph, within a token budget — better than reading files), `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
+            "CodeGraph indexes this repository into a live code knowledge graph (auto-reindexed before each query). Its tools return exact file:line and resolved call edges, so they beat text search for code navigation: `search` to locate a symbol, `callers`/`callees` to trace call edges, `blast_radius` before a refactor, `trace_path` between two symbols, `important` to map an unfamiliar repo, `context` to assemble the symbols relevant to a task (personalized PageRank over the resolved graph, within a token budget — better than reading files), `implementers` for the concrete types behind an interface, `routes` for the HTTP API surface, `semantic_search` to find code by meaning, `get_node` for one symbol's details, `stats` for counts. \
              IMPORTANT — coverage: `callers`/`callees`/`blast_radius` resolve calls precisely but NOT exhaustively (ambiguous or external calls are dropped, never guessed). Each result carries a `coverage` object with `resolved`/`dropped`/`may_be_incomplete`. When `may_be_incomplete` is true, treat the list as a precise LOWER BOUND, not the complete set — fall back to text search (grep the name) before concluding 'nothing else calls this'."
                 .to_string(),
         );
