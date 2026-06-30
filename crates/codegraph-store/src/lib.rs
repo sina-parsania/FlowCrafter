@@ -15,6 +15,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("serialization: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Msg(String),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -308,6 +310,48 @@ impl Store {
         let mut out = Vec::new();
         for r in rows {
             out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
+    /// Forgiving search: exact FTS first (precise), and if that's empty fall back
+    /// to an OR-of-prefixes over the query's identifier tokens — so a camelCase
+    /// fragment like `MealSenseCook` finds `MealSenseCookSession` (one FTS token).
+    /// Multiple words are OR'd (multi-term search). FTS special chars are stripped.
+    pub fn search_smart(&self, raw: &str, limit: usize) -> Result<Vec<Node>> {
+        let exact = self.search_fts(raw, limit)?;
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let fts = raw
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|t| t.len() > 1)
+            .filter(|t| seen.insert(t.to_lowercase()))
+            .map(|t| format!("{t}*"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        if fts.is_empty() {
+            return Ok(exact);
+        }
+        self.search_fts(&fts, limit)
+    }
+
+    /// Regex search over symbol names (anywhere in the name, not just a prefix) —
+    /// for patterns FTS can't express (middle fragments, alternations, anchors).
+    pub fn search_regex(&self, pattern: &str, limit: usize) -> Result<Vec<Node>> {
+        let re = regex::Regex::new(pattern).map_err(|e| StoreError::Msg(format!("bad regex: {e}")))?;
+        let mut stmt = self.conn.prepare("SELECT data FROM nodes WHERE name <> ''")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let n: Node = serde_json::from_str(&r?)?;
+            if re.is_match(&n.name) {
+                out.push(n);
+                if out.len() >= limit {
+                    break;
+                }
+            }
         }
         Ok(out)
     }

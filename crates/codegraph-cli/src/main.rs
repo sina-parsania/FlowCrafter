@@ -87,6 +87,10 @@ enum Command {
         /// Rerank results with a local LLM (if one is running).
         #[arg(long)]
         rerank: bool,
+        /// Treat the term as a REGEX matched against symbol names (middle
+        /// fragments, alternations, anchors) instead of full-text search.
+        #[arg(long)]
+        regex: bool,
     },
     /// Shortest dependency path between two symbols (by name).
     Trace { from: String, to: String, #[arg(long, default_value = ".")] path: PathBuf },
@@ -344,10 +348,11 @@ fn main() -> anyhow::Result<()> {
                 db.display()
             );
         }
-        Command::Search { term, path, limit, rerank } => {
+        Command::Search { term, path, limit, rerank, regex } => {
             let db = index::db_path(&path);
             let store = codegraph_store::Store::open(&db)?;
-            let mut hits = store.search_fts(&term, limit)?;
+            let mut hits =
+                if regex { store.search_regex(&term, limit)? } else { store.search_smart(&term, limit)? };
             if rerank || cfg.llm.rerank {
                 if let Some(llm) = codegraph_llm::OpenAiCompatBackend::detect() {
                     hits = query::rerank(&term, hits, &llm);

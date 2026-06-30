@@ -44,6 +44,10 @@ pub struct SearchArgs {
     /// Maximum number of results (default 20).
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Treat `query` as a REGEX over symbol names (middle fragments, alternations,
+    /// anchors) instead of full-text search.
+    #[serde(default)]
+    pub regex: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -127,9 +131,13 @@ impl CodeGraphServer {
     #[tool(description = "Find where a symbol (function/class/type) is defined or referenced, by name. PREFER over Grep/ripgrep for code navigation: indexed, returns exact file:line + the node kind, no matches inside comments/strings. Use before reading files.")]
     async fn search(&self, args: Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
-        let hits = store
-            .search_fts(&args.0.query, args.0.limit.unwrap_or(20))
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let limit = args.0.limit.unwrap_or(20);
+        let hits = if args.0.regex.unwrap_or(false) {
+            store.search_regex(&args.0.query, limit)
+        } else {
+            store.search_smart(&args.0.query, limit)
+        }
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::json(hits)?]))
     }
 
