@@ -69,6 +69,10 @@ pub struct IdArgs {
 pub struct NameArgs {
     /// Function name.
     pub name: String,
+    /// Pin ONE definition by node id (from a prior candidates list) — callers of
+    /// exactly that definition, never a same-name union.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -169,12 +173,33 @@ impl CodeGraphServer {
     #[tool(description = "List the functions that CALL a given function (reverse call edges). PREFER over grepping the name: resolved and exact, no false hits in comments/strings. The result includes a `coverage` object — if `coverage.may_be_incomplete` is true, some calls to this name were dropped (ambiguous/external); fall back to text search to be sure.")]
     async fn callers(&self, args: Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let store = self.open()?;
-        let callers = store
-            .callers_of(&args.0.name)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let coverage = store
-            .coverage_for_callers(&args.0.name)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let err = |e: codegraph_store::StoreError| McpError::internal_error(e.to_string(), None);
+        if let Some(pin) = &args.0.id {
+            let callers = store.callers_of_id(pin).map_err(err)?;
+            return Ok(CallToolResult::success(vec![Content::json(
+                serde_json::json!({"pinned": pin, "callers": callers}),
+            )?]));
+        }
+        let defs = store.definitions_of(&args.0.name).map_err(err)?;
+        if defs.len() > 1 {
+            // Ambiguous: return pinnable candidates instead of silently merging
+            // callers of different same-name definitions (what rivals do).
+            let candidates: Vec<serde_json::Value> = defs
+                .iter()
+                .map(|(d, nc)| serde_json::json!({
+                    "id": d.id, "file": d.file_path, "line": d.line_start, "resolved_callers": nc,
+                }))
+                .collect();
+            let coverage = store.coverage_for_callers(&args.0.name).map_err(err)?;
+            return Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+                "ambiguous": true,
+                "note": format!("'{}' has {} definitions; callers differ per definition. Re-call with id=<id> to pin one.", args.0.name, defs.len()),
+                "candidates": candidates,
+                "coverage": coverage,
+            }))?]));
+        }
+        let callers = store.callers_of(&args.0.name).map_err(err)?;
+        let coverage = store.coverage_for_callers(&args.0.name).map_err(err)?;
         Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
             "callers": callers,
             "coverage": coverage,

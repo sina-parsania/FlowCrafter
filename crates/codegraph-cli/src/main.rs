@@ -197,10 +197,15 @@ enum Command {
     /// Find types that implement or extend a given interface/class.
     Implementers { name: String, #[arg(long, default_value = ".")] path: PathBuf },
     /// Find functions that call a given function name (reverse CALLS edges).
+    /// Ambiguous name (several definitions) → lists pinnable candidates instead
+    /// of silently merging their callers.
     Callers {
         name: String,
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Pin ONE definition by its node id (from the candidate list).
+        #[arg(long)]
+        id: Option<String>,
     },
     /// Ask a natural-language question; answered by a local LLM over the graph (if one is running).
     Ask {
@@ -411,8 +416,25 @@ fn main() -> anyhow::Result<()> {
                 println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
             }
         }
-        Command::Callers { name, path } => {
+        Command::Callers { name, path, id } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
+            if let Some(pin) = id {
+                // Pinned: callers of exactly ONE definition, never a same-name union.
+                for n in store.callers_of_id(&pin)? {
+                    println!("{:<24} {:?}  {}:{}", n.name, n.label, n.file_path, n.line_start);
+                }
+                return Ok(());
+            }
+            let defs = store.definitions_of(&name)?;
+            if defs.len() > 1 {
+                println!("⚠ {:?} has {} definitions — callers are grouped per definition (rivals silently merge these). Pin one with --id <id>:
+", name, defs.len());
+                for (d, nc) in defs.iter().take(15) {
+                    println!("  [{nc:>3} callers]  {}:{}  id={}", d.file_path, d.line_start, d.id);
+                }
+                print_coverage(&store.coverage_for_callers(&name)?);
+                return Ok(());
+            }
             let callers = store.callers_of(&name)?;
             if callers.is_empty() {
                 println!("no callers of {:?}", name);

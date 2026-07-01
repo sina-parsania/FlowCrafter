@@ -523,6 +523,41 @@ impl Store {
         Ok(out)
     }
 
+
+    /// All Function/Method definitions named `name`, each with its RESOLVED-caller
+    /// count — the candidate list for disambiguating an ambiguous query. Rivals
+    /// either silently union all same-name definitions or refuse; we ASK.
+    pub fn definitions_of(&self, name: &str) -> Result<Vec<(Node, usize)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.data, (SELECT COUNT(DISTINCT e.src) FROM edges e
+                             WHERE e.relation = 'Calls' AND e.dst = n.id) AS nc
+             FROM nodes n WHERE n.name = ?1 AND n.label IN ('Function','Method')
+             ORDER BY nc DESC, n.file_path",
+        )?;
+        let rows = stmt.query_map([name], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (data, nc) = r?;
+            out.push((serde_json::from_str(&data)?, nc as usize));
+        }
+        Ok(out)
+    }
+
+    /// Callers of ONE specific definition (pinned by node id) — never unions
+    /// same-name definitions.
+    pub fn callers_of_id(&self, id: &str) -> Result<Vec<Node>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT s.data FROM edges e JOIN nodes s ON s.id = e.src
+             WHERE e.relation = 'Calls' AND e.dst = ?1",
+        )?;
+        let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(serde_json::from_str(&r?)?);
+        }
+        Ok(out)
+    }
+
     pub fn callers_of(&self, name: &str) -> Result<Vec<Node>> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT s.data FROM edges e              JOIN nodes t ON t.id = e.dst              JOIN nodes s ON s.id = e.src              WHERE e.relation = 'Calls' AND t.name = ?1",
