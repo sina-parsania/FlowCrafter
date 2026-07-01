@@ -158,7 +158,10 @@ impl CodeGraphServer {
             store.search_smart(&args.0.query, limit)
         }
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::json(hits)?]))
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "hits": hits,
+            "_hints": ["get_node(id) for full details", "callers(name) to trace usage", "context(query) to assemble task context"],
+        }))?]))
     }
 
     #[tool(description = "Get full details of one symbol by its fully-qualified id (from a prior search/callers result): kind, file:line, language, metadata.")]
@@ -203,6 +206,7 @@ impl CodeGraphServer {
         Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
             "callers": callers,
             "coverage": coverage,
+            "_hints": ["blast_radius(name) before changing it", "co_changes(file) for what usually changes too"],
         }))?]))
     }
 

@@ -414,6 +414,17 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                             pagerank: 0.0,
                             betweenness: 0.0,
                         });
+                        // Link the enclosing fn to the route HUB node. Route ids are
+                        // path+method keyed (project-agnostic), so a backend handler
+                        // registration and a frontend client call collapse onto the
+                        // SAME node — cross-project connectivity via exact-path match.
+                        calls.push(RawCall {
+                            caller_id: current_fn.unwrap_or(ctx.file_id).to_string(),
+                            callee_name: format!("route.{}.{}", normalize_path(&path), method),
+                            line,
+                            receiver: Receiver::Bare,
+                            enclosing_class: None,
+                        });
                     }
                 }
             }

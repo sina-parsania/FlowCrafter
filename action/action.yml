@@ -1,0 +1,39 @@
+name: 'CodeGraph Review'
+description: 'Risk-scored PR review from a resolved code graph (single 5MB binary, no pip/npm).'
+inputs:
+  fail-on-high-risk:
+    description: 'Fail the job if any HIGH-risk symbol is in the diff.'
+    default: 'false'
+  base:
+    description: 'Base ref to diff against.'
+    default: 'origin/main'
+runs:
+  using: composite
+  steps:
+    - name: Install codegraph
+      shell: bash
+      run: |
+        curl -sL "https://github.com/sina-parsania/FlowCrafter/releases/latest/download/codegraph-macos-arm64" -o /usr/local/bin/codegraph || true
+        chmod +x /usr/local/bin/codegraph 2>/dev/null || true
+        codegraph --version
+    - name: Index + review
+      shell: bash
+      run: |
+        codegraph index . >/dev/null
+        codegraph review --base "${{ inputs.base }}" --md > review.md
+        cat review.md >> "$GITHUB_STEP_SUMMARY"
+    - name: Sticky PR comment
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        # upsert by marker
+        PR=${{ github.event.pull_request.number }}
+        OLD=$(gh api "repos/${{ github.repository }}/issues/$PR/comments" --jq '.[] | select(.body | contains("<!-- codegraph-review -->")) | .id' | head -1)
+        if [ -n "$OLD" ]; then gh api -X PATCH "repos/${{ github.repository }}/issues/comments/$OLD" -f body="$(cat review.md)" >/dev/null
+        else gh pr comment "$PR" --body-file review.md >/dev/null; fi
+    - name: Risk gate
+      if: inputs.fail-on-high-risk == 'true'
+      shell: bash
+      run: '! grep -q "| HIGH " review.md'

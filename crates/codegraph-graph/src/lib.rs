@@ -229,8 +229,28 @@ pub fn build(
         }
     }
 
+    // Route-hub ids present in this graph (for exact-id HTTP linking).
+    let route_ids: HashSet<&str> =
+        nodes.iter().filter(|n| n.label == NodeLabel::Route).map(|n| n.id.as_str()).collect();
+
     for c in calls {
         let Some(caller) = by_id.get(c.caller_id.as_str()) else { continue };
+        // HTTP hub link: callee is a route id (exact path+method key) -> direct edge.
+        if c.callee_name.starts_with("route.") && route_ids.contains(c.callee_name.as_str()) {
+            let mut metadata = Metadata::new();
+            metadata.insert("justification".to_string(), serde_json::Value::String("HttpPath".to_string()));
+            push_edge(&mut edges, &mut seen, Edge {
+                src: c.caller_id.clone(),
+                dst: c.callee_name.clone(),
+                relation: EdgeRelation::HttpCalls,
+                tier: ResolutionTier::TreeSitter,
+                confidence: Confidence::Extracted,
+                src_file: caller.file_path.clone(),
+                src_line: c.line,
+                metadata,
+            });
+            continue;
+        }
         // Receiver-aware tiers (provably correct, unique-or-drop, never a guess):
         // T1 self/this -> enclosing class; T3 this.field.method() -> the field's
         // declared type's class. Everything else falls back to the existing

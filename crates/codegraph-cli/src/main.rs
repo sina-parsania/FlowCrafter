@@ -158,13 +158,17 @@ enum Command {
         limit: usize,
     },
     /// Change-aware review: map the git diff against a base to affected symbols,
-    /// with fan-in, test-gap flags, a risk tier, and co-change hints.
+    /// with fan-in, complexity, test-gap flags, a risk tier, and co-change hints.
+    #[command(visible_alias = "review")]
     Changes {
         #[arg(long, default_value = ".")]
         path: PathBuf,
         /// Base to diff against (any git ref).
         #[arg(long, default_value = "HEAD")]
         base: String,
+        /// Emit a markdown report (for PR comments / CI).
+        #[arg(long)]
+        md: bool,
     },
     /// Execution flows: call chains from ENTRY POINTS (route handlers, main,
     /// zero-fan-in hubs), ranked by criticality (reach × centrality).
@@ -678,7 +682,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Changes { path, base } => {
+        Command::Changes { path, base, md } => {
             let store = codegraph_store::Store::open(&index::db_path(&path))?;
             let out = std::process::Command::new("git")
                 .args(["-C", &path.to_string_lossy(), "diff", "--name-only", &base])
@@ -692,32 +696,41 @@ fn main() -> anyhow::Result<()> {
                 println!("no changes vs {base}");
                 return Ok(());
             }
-            println!("# changes vs {base}: {} file(s)\n", changed.len());
-            let mut rows: Vec<(usize, bool, codegraph_core::Node)> = Vec::new();
+            let mut rows: Vec<(f64, usize, u64, bool, codegraph_core::Node)> = Vec::new();
             for f in &changed {
                 for sym in store.symbols_in_file(f)? {
                     let fan_in = store.call_site_count(&sym.name)?;
                     let tested = store.has_test_reference(&sym.name)?;
-                    rows.push((fan_in, tested, sym));
+                    let cx = sym.metadata.get("complexity").and_then(|v| v.as_u64()).unwrap_or(1);
+                    // Multiplicative risk (no crg-style flat keyword bumps): reach ×
+                    // intrinsic complexity × untested penalty. Resolved-data only.
+                    let risk = (1.0 + fan_in as f64).ln() * (1.0 + cx as f64 / 10.0) * if tested { 1.0 } else { 2.0 };
+                    rows.push((risk, fan_in, cx, tested, sym));
                 }
             }
-            // risk = blast (fan-in) amplified when untested
-            rows.sort_by_key(|(fan_in, tested, _)| std::cmp::Reverse(fan_in * if *tested { 1 } else { 3 }));
-            for (fan_in, tested, sym) in rows.iter().take(40) {
-                let risk = match (fan_in, tested) {
-                    (f, false) if *f >= 10 => "HIGH",
-                    (f, _) if *f >= 10 => "MED ",
-                    (f, false) if *f >= 3 => "MED ",
-                    _ => "low ",
-                };
-                println!(
-                    "{risk}  {:<26} fan-in={:<4} {}  {}:{}",
-                    sym.name,
-                    fan_in,
-                    if *tested { "tested" } else { "NO-TESTS" },
-                    sym.file_path,
-                    sym.line_start
-                );
+            rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            let tier = |r: f64| if r >= 6.0 { "HIGH" } else if r >= 2.5 { "MED " } else { "low " };
+            if md {
+                println!("<!-- codegraph-review -->");
+                println!("## CodeGraph review — {} file(s) vs `{base}`\n", changed.len());
+                println!("| risk | symbol | fan-in | cx | tests | location |");
+                println!("|------|--------|-------:|---:|-------|----------|");
+                for (risk, fan_in, cx, tested, sym) in rows.iter().take(30) {
+                    println!(
+                        "| {} {:.1} | `{}` | {} | {} | {} | `{}:{}` |",
+                        tier(*risk).trim(), risk, sym.name, fan_in, cx,
+                        if *tested { "✓" } else { "**none**" }, sym.file_path, sym.line_start
+                    );
+                }
+            } else {
+                println!("# changes vs {base}: {} file(s)\n", changed.len());
+                for (risk, fan_in, cx, tested, sym) in rows.iter().take(40) {
+                    println!(
+                        "{} {:>5.1}  {:<26} fan-in={:<4} cx={:<3} {}  {}:{}",
+                        tier(*risk), risk, sym.name, fan_in, cx,
+                        if *tested { "tested" } else { "NO-TESTS" }, sym.file_path, sym.line_start
+                    );
+                }
             }
             // co-change hints: files that usually change with these but aren't in the diff
             let mut hints: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
