@@ -98,3 +98,17 @@ Even fully executed, this doesn't make us "decisively superior" on every axis �
 breadth (158 langs, cross-service, Cypher, 28M-LOC scale) and code-review-graph's review/CI polish are
 real. It DOES close the gaps that matter for our niche (precision-honest code intelligence, Swift
 compiler-grade, safe editing, serverless) and adds their best cheap ideas on top.
+
+---
+
+## STATUS (2026-07-01)
+
+**SHIPPED — Batch 1 (v1.20.0):** W1.1 subword FTS (schema v3, `cg_subwords` UDF, in-place
+migration) · W2.3 git co-change (`cochanges` + `co_changes` tool) · W5.1 dead-code
+(raw-call-site evidence, entry-point/route/constructor/test exclusions) · W3.1 `changes`
+(diff → affected symbols + fan-in + test-gap + risk tier + co-change hints), CLI + MCP.
+**SHIPPED — Batch 2 (v1.21.0):** W4.2/T6 ImportNarrowed (TS/JS relative + Python dotted;
+import = evidence; conflict → drop) + Go PackageScope tier. Measured: backend-app +225
+CALLS (762 import-narrowed), knowledge-rag 17% import-justified. MCP = 15 tools.
+**NEXT:** W1.2 nomic-code embeddings · W2.1 IMPORTS/USES_TYPE/TESTS as first-class edges ·
+W3.2 GitHub Action · W6.2 shared graph artifact · W7.1 Cypher-lite · B1 class-qualified IDs.
