@@ -3,7 +3,7 @@
 //! extraction mode). Adding a language = one grammar dep + one `LangSpec`.
 
 use codegraph_core::{
-    InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawInherit, RawLocal, Receiver,
+    InheritKind, Metadata, Node, NodeLabel, QualifiedName, RawCall, RawField, RawImport, RawInherit, RawLocal, Receiver,
 };
 use tree_sitter::{Language, Node as TsNode, Parser};
 
@@ -13,6 +13,7 @@ pub struct ParsedFile {
     pub inherits: Vec<RawInherit>,
     pub fields: Vec<RawField>,
     pub locals: Vec<RawLocal>,
+    pub imports: Vec<RawImport>,
 }
 
 impl ParsedFile {
@@ -23,6 +24,7 @@ impl ParsedFile {
             inherits: Vec::new(),
             fields: Vec::new(),
             locals: Vec::new(),
+            imports: Vec::new(),
         }
     }
 }
@@ -310,9 +312,10 @@ fn parse_with(spec: &LangSpec, project: &str, rel_path: &str, source: &str) -> P
     let mut inherits = Vec::new();
     let mut fields = Vec::new();
     let mut locals = Vec::new();
+    let mut imports = Vec::new();
     let ctx = Ctx { spec, project, segs: &file_segs, rel_path, file_id: &file_id };
-    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits, &mut fields, &mut locals);
-    ParsedFile { nodes, calls, inherits, fields, locals }
+    collect(tree.root_node(), bytes, &ctx, None, None, &mut nodes, &mut calls, &mut inherits, &mut fields, &mut locals, &mut imports);
+    ParsedFile { nodes, calls, inherits, fields, locals, imports }
 }
 
 struct Ctx<'a> {
@@ -325,7 +328,7 @@ struct Ctx<'a> {
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>, fields: &mut Vec<RawField>, locals: &mut Vec<RawLocal>) {
+fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_class: Option<&str>, nodes: &mut Vec<Node>, calls: &mut Vec<RawCall>, inherits: &mut Vec<RawInherit>, fields: &mut Vec<RawField>, locals: &mut Vec<RawLocal>, imports: &mut Vec<RawImport>) {
     let mut my_fn_id: Option<String> = None;
     let mut my_class_id: Option<String> = None;
 
@@ -364,6 +367,13 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
             "java" => java_extract_fields(node, src, cls_id, fields),
             _ => {}
         }
+    }
+
+    // Import bindings (T6 evidence): TS/JS relative imports + Python from-imports.
+    match (ctx.spec.name, node.kind()) {
+        ("typescript" | "javascript", "import_statement") => ts_extract_import(node, src, ctx.rel_path, imports),
+        ("python", "import_from_statement") => py_extract_import(node, src, ctx.rel_path, imports),
+        _ => {}
     }
 
     // At a TS function/method, infer the static type of its declared-type locals
@@ -438,7 +448,7 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
     };
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits, fields, locals);
+        collect(child, src, ctx, next_fn, next_this_class, nodes, calls, inherits, fields, locals, imports);
     }
 }
 
@@ -842,6 +852,84 @@ fn trailing_ident(node: TsNode, src: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+
+/// TS/JS `import { A, B as C } from './mod'` / `import X from './mod'` → bindings.
+/// Only RELATIVE modules (./ ../) are kept — they map to project files; package
+/// imports are external and can never resolve to an internal node.
+fn ts_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<RawImport>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let Some(module) = node
+        .child_by_field_name("source")
+        .and_then(text)
+        .map(|m| m.trim_matches(|c| c == '"' || c == '\'' || c == '`').to_string())
+    else {
+        return;
+    };
+    if !module.starts_with('.') {
+        return;
+    }
+    let mut push = |name: String| {
+        if !name.is_empty() {
+            out.push(RawImport { file_path: rel_path.to_string(), name, module: module.clone() });
+        }
+    };
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "import_specifier" => {
+                // `A as B` binds B locally; plain `A` binds A.
+                let bound = n.child_by_field_name("alias").or_else(|| n.child_by_field_name("name"));
+                if let Some(name) = bound.and_then(text) {
+                    push(name);
+                }
+                continue;
+            }
+            "import_clause" => {
+                // default import: a bare identifier child
+                for i in 0..n.named_child_count() as u32 {
+                    if let Some(ch) = n.named_child(i) {
+                        if ch.kind() == "identifier" {
+                            if let Some(name) = text(ch) {
+                                push(name);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        let mut c = n.walk();
+        for ch in n.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+}
+
+/// Python `from a.b import X, Y as Z` → bindings (module kept dotted; relative
+/// `from . import x` keeps the leading dots for the resolver to interpret).
+fn py_extract_import(node: TsNode, src: &[u8], rel_path: &str, out: &mut Vec<RawImport>) {
+    let text = |n: TsNode| std::str::from_utf8(&src[n.byte_range()]).ok().map(str::to_string);
+    let Some(module) = node.child_by_field_name("module_name").and_then(text) else { return };
+    for i in 0..node.named_child_count() as u32 {
+        let Some(ch) = node.named_child(i) else { continue };
+        match ch.kind() {
+            "dotted_name" if Some(ch) != node.child_by_field_name("module_name") => {
+                if let Some(name) = text(ch) {
+                    if !name.contains('.') {
+                        out.push(RawImport { file_path: rel_path.to_string(), name, module: module.clone() });
+                    }
+                }
+            }
+            "aliased_import" => {
+                if let Some(name) = ch.child_by_field_name("alias").and_then(text) {
+                    out.push(RawImport { file_path: rel_path.to_string(), name, module: module.clone() });
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

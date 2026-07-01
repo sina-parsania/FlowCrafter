@@ -230,6 +230,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
                     inherits: Vec::new(),
                     fields: Vec::new(),
                     locals: Vec::new(),
+                    imports: Vec::new(),
                 }
             } else {
                 parse_file(&project, rel, source)
@@ -247,6 +248,7 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
         store.save_inherits(&rel, &pf.inherits)?;
         store.save_fields(&rel, &pf.fields)?;
         store.save_locals(&rel, &pf.locals)?;
+        store.save_imports(&rel, &pf.imports)?;
         store.save_manifest(&rel, &sha, mtime)?;
         changed_nodes.extend(pf.nodes);
     }
@@ -282,7 +284,8 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     let inherits = store.all_inherits()?;
     let fields = store.all_fields()?;
     let locals = store.all_locals()?;
-    let built = build(&nodes, &calls, &inherits, &fields, &locals);
+    let imports = store.all_imports()?;
+    let built = build(&nodes, &calls, &inherits, &fields, &locals, &imports);
     let mut edges = built.edges;
     let scip_edges = merge_scip_edges(root, scip, &nodes, &mut edges);
     let indexstore_edges = if indexstore { merge_indexstore_edges(root, &nodes, &mut edges) } else { 0 };

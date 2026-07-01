@@ -157,6 +157,16 @@ pub struct RawField {
     pub type_name: String,
 }
 
+/// An import binding: `name` is usable in `file_path` and comes from `module`
+/// (language-specific spec: TS relative path, Python dotted module). The resolver
+/// uses it as EVIDENCE to bind an otherwise-ambiguous bare call to one module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawImport {
+    pub file_path: String,
+    pub name: String,
+    pub module: String,
+}
+
 /// A local variable whose static type the parser inferred within a function body
 /// (declared-type locals + typed params; flow-insensitive single-assignment —
 /// conflicting/ambiguous declarations are dropped, never guessed). Lets the

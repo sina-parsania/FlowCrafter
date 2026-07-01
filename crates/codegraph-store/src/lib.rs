@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use codegraph_core::{
-    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawField, RawInherit, RawLocal,
+    Coverage, Edge, Hyperedge, HyperedgeMember, InheritKind, Node, RawCall, RawField, RawImport, RawInherit, RawLocal,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
@@ -163,6 +163,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS fields(
                class_id TEXT, field_name TEXT, type_name TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_fields_file ON fields(file_path);
+             CREATE TABLE IF NOT EXISTS imports(
+               file_path TEXT, name TEXT, module TEXT);
+             CREATE INDEX IF NOT EXISTS idx_imports_file ON imports(file_path);
              CREATE TABLE IF NOT EXISTS locals(
                caller_id TEXT, var_name TEXT, type_name TEXT, file_path TEXT);
              CREATE INDEX IF NOT EXISTS idx_locals_file ON locals(file_path);
@@ -315,16 +318,14 @@ impl Store {
 
     /// Replace the git co-change pairs (files that historically change together).
     pub fn save_cochanges(&self, pairs: &[(String, String, u32)]) -> Result<()> {
-        self.conn.execute_batch("BEGIN")?;
+        // No own BEGIN/COMMIT: index_dir already runs inside a transaction
+        // (nested BEGIN is an error); called nowhere else.
         self.conn.execute("DELETE FROM cochanges", [])?;
-        {
-            let mut stmt =
-                self.conn.prepare("INSERT OR REPLACE INTO cochanges(file_a,file_b,n) VALUES(?1,?2,?3)")?;
-            for (a, b, n) in pairs {
-                stmt.execute(params![a, b, n])?;
-            }
+        let mut stmt =
+            self.conn.prepare("INSERT OR REPLACE INTO cochanges(file_a,file_b,n) VALUES(?1,?2,?3)")?;
+        for (a, b, n) in pairs {
+            stmt.execute(params![a, b, n])?;
         }
-        self.conn.execute_batch("COMMIT")?;
         Ok(())
     }
 
@@ -690,6 +691,7 @@ impl Store {
         self.conn.execute("DELETE FROM inherits WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM fields WHERE file_path = ?1", [file_path])?;
         self.conn.execute("DELETE FROM locals WHERE file_path = ?1", [file_path])?;
+        self.conn.execute("DELETE FROM imports WHERE file_path = ?1", [file_path])?;
         Ok(())
     }
 
@@ -754,6 +756,24 @@ impl Store {
         let mut stmt = self.conn.prepare("SELECT class_id, field_name, type_name FROM fields")?;
         let rows = stmt.query_map([], |r| {
             Ok(RawField { class_id: r.get(0)?, field_name: r.get(1)?, type_name: r.get(2)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn save_imports(&self, file_path: &str, items: &[RawImport]) -> Result<()> {
+        self.conn.execute("DELETE FROM imports WHERE file_path = ?1", [file_path])?;
+        let mut stmt =
+            self.conn.prepare("INSERT INTO imports(file_path, name, module) VALUES(?1, ?2, ?3)")?;
+        for i in items {
+            stmt.execute(params![file_path, i.name, i.module])?;
+        }
+        Ok(())
+    }
+
+    pub fn all_imports(&self) -> Result<Vec<RawImport>> {
+        let mut stmt = self.conn.prepare("SELECT file_path, name, module FROM imports")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RawImport { file_path: r.get(0)?, name: r.get(1)?, module: r.get(2)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

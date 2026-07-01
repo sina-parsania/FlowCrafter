@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use codegraph_core::{
     Confidence, Edge, EdgeRelation, Hyperedge, HyperedgeMember, HyperedgeRelation, InheritKind, Metadata,
-    Node, NodeLabel, RawCall, RawField, RawInherit, RawLocal, Receiver, ResolutionTier,
+    Node, NodeLabel, RawCall, RawField, RawImport, RawInherit, RawLocal, Receiver, ResolutionTier,
 };
 
 /// Class-Hierarchy-Analysis member resolution (docs/RESOLUTION.md): find the method
@@ -42,6 +42,66 @@ fn resolve_member<'a>(
     }
     None
 }
+
+/// T6: bind a bare call to the ONE file its import points at. The import is the
+/// evidence; still unique-or-drop (no def in the resolved file → None, never guess).
+/// TS/JS: relative module → sibling file with known extensions (or /index.*).
+/// Python: dotted module → path with .py (searched by suffix match).
+fn resolve_via_import<'a>(
+    caller: &Node,
+    callee: &str,
+    import_map: &HashMap<(&str, &str), Vec<&'a str>>,
+    fn_by_file_name: &HashMap<(&'a str, &'a str), &'a str>,
+) -> Option<&'a str> {
+    let modules = import_map.get(&(caller.file_path.as_str(), callee))?;
+    if modules.len() != 1 {
+        return None; // conflicting imports of the same name → drop
+    }
+    let module = modules[0];
+    let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    let mut hits: Vec<&str> = Vec::new();
+    if module.starts_with('.') {
+        // TS/JS relative: normalize ./ ../ against the caller's dir.
+        let base = join_normalize(dir, module);
+        for cand in [
+            format!("{base}.ts"), format!("{base}.tsx"), format!("{base}.js"),
+            format!("{base}.jsx"), format!("{base}.mjs"),
+            format!("{base}/index.ts"), format!("{base}/index.tsx"), format!("{base}/index.js"),
+        ] {
+            if let Some(&id) = fn_by_file_name.get(&(cand.as_str(), callee)) {
+                if !hits.contains(&id) {
+                    hits.push(id);
+                }
+            }
+        }
+    } else if caller.language == "python" {
+        // Python dotted: a.b.c → …/a/b/c.py — match by path suffix (repo-root unknown).
+        let tail = format!("{}.py", module.replace('.', "/"));
+        for (&(file, name), &id) in fn_by_file_name.iter() {
+            let init = format!("{}/__init__.py", module.replace('.', "/"));
+            if name == callee && (file.ends_with(&tail) || file.ends_with(&init)) && !hits.contains(&id) {
+                hits.push(id);
+            }
+        }
+    }
+    (hits.len() == 1).then(|| hits[0])
+}
+
+/// Join `module` (./x, ../y/z) onto `dir`, resolving . and .. segments.
+fn join_normalize(dir: &str, module: &str) -> String {
+    let mut parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for seg in module.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 /// Directed graph of node-id → node-id, edge weight = relation name.
@@ -63,6 +123,7 @@ pub fn build(
     inherits: &[RawInherit],
     fields: &[RawField],
     locals: &[RawLocal],
+    imports: &[RawImport],
 ) -> Built {
     let by_id: HashMap<&str, &Node> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let file_by_path: HashMap<&str, &str> = nodes
@@ -122,6 +183,18 @@ pub fn build(
             .or_default()
             .insert(f.field_name.as_str(), f.type_name.as_str());
     }
+    // import_map: (file, bound name) -> imported-from modules (T6 evidence).
+    let mut import_map: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+    for im in imports {
+        import_map.entry((im.file_path.as_str(), im.name.as_str())).or_default().push(im.module.as_str());
+    }
+    // fn_by_dir_name: (dir, name) -> fn ids (Go package scope: dir == package).
+    let mut fn_by_dir_name: HashMap<(&str, &str), Vec<&str>> = HashMap::new();
+    for n in nodes.iter().filter(|n| matches!(n.label, NodeLabel::Function | NodeLabel::Method)) {
+        let dir = n.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        fn_by_dir_name.entry((dir, n.name.as_str())).or_default().push(n.id.as_str());
+    }
+
     // local_types: caller fn id -> local var name -> inferred type name (T5).
     let mut local_types: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
     for l in locals {
@@ -205,11 +278,29 @@ pub fn build(
             _ => None,
         };
         let resolved: Option<(&str, &'static str)> = receiver_resolved.or_else(|| match &c.receiver {
-            // Unqualified `foo()`: same-file scope is reasonable, then global-unique.
+            // Unqualified `foo()`: same-file first (locals shadow imports), then the
+            // file's imports (T6 — the import IS the evidence), then Go package
+            // scope (dir == package, a language guarantee), then global-unique.
             Receiver::Bare => fn_by_file_name
                 .get(&(caller.file_path.as_str(), c.callee_name.as_str()))
                 .copied()
                 .map(|id| (id, "SameFileUnique"))
+                .or_else(|| {
+                    resolve_via_import(caller, &c.callee_name, &import_map, &fn_by_file_name)
+                        .map(|id| (id, "ImportNarrowed"))
+                })
+                .or_else(|| {
+                    (caller.language == "go")
+                        .then(|| {
+                            let dir = caller.file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                            match fn_by_dir_name.get(&(dir, c.callee_name.as_str())) {
+                                Some(ids) if ids.len() == 1 => Some(ids[0]),
+                                _ => None,
+                            }
+                        })
+                        .flatten()
+                        .map(|id| (id, "PackageScope"))
+                })
                 .or_else(|| global_unique().map(|id| (id, "GlobalUnique"))),
             // Qualified call we couldn't type (named var / super / dropped self or
             // field): only a globally-unique name is provably correct — never guess
@@ -330,7 +421,7 @@ mod tests {
     #[test]
     fn structural_and_call_edges() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
 
         let calls: Vec<_> = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls).collect();
         assert_eq!(calls.len(), 1, "duplicate calls should dedupe to one edge");
@@ -340,8 +431,8 @@ mod tests {
     }
 
     fn build_ts(files: &[(&str, &str)]) -> Built {
-        let (mut nodes, mut calls, mut inherits, mut fields, mut locals) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut nodes, mut calls, mut inherits, mut fields, mut locals, mut imports) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (f, src) in files {
             let pf = codegraph_parse::parse_ts("p", f, src);
             nodes.extend(pf.nodes);
@@ -349,13 +440,14 @@ mod tests {
             inherits.extend(pf.inherits);
             fields.extend(pf.fields);
             locals.extend(pf.locals);
+            imports.extend(pf.imports);
         }
-        build(&nodes, &calls, &inherits, &fields, &locals)
+        build(&nodes, &calls, &inherits, &fields, &locals, &imports)
     }
 
     fn build_swift(files: &[(&str, &str)]) -> Built {
-        let (mut nodes, mut calls, mut inherits, mut fields, mut locals) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut nodes, mut calls, mut inherits, mut fields, mut locals, mut imports) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (f, src) in files {
             let pf = codegraph_parse::parse_swift("p", f, src);
             nodes.extend(pf.nodes);
@@ -363,8 +455,9 @@ mod tests {
             inherits.extend(pf.inherits);
             fields.extend(pf.fields);
             locals.extend(pf.locals);
+            imports.extend(pf.imports);
         }
-        build(&nodes, &calls, &inherits, &fields, &locals)
+        build(&nodes, &calls, &inherits, &fields, &locals, &imports)
     }
 
     #[test]
@@ -454,6 +547,38 @@ mod tests {
         assert_eq!(save, 0, "conflicting local types must drop, not guess");
     }
 
+
+    #[test]
+    fn t6_import_narrowed_resolves_ambiguous_cross_file() {
+        // `save` is defined in TWO files (globally ambiguous). The caller imports it
+        // from './a' — the import is the evidence → resolves to a.ts's save.
+        let built = build_ts(&[
+            ("src/a.ts", "export function save() {}"),
+            ("src/b.ts", "export function save() {}"),
+            ("src/svc.ts", "import { save } from './a';\nexport function go() { save(); }"),
+        ]);
+        let hits: Vec<_> = built
+            .edges
+            .iter()
+            .filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save"))
+            .collect();
+        assert_eq!(hits.len(), 1, "import-narrowed call resolves to exactly one def");
+        assert!(hits[0].dst.contains(".a_ts."), "resolved to a.ts, not b.ts");
+        assert_eq!(hits[0].metadata.get("justification").and_then(|v| v.as_str()), Some("ImportNarrowed"));
+    }
+
+    #[test]
+    fn t6_no_import_ambiguous_still_drops() {
+        // Same ambiguity, NO import → must stay dropped (no phantom edge).
+        let built = build_ts(&[
+            ("src/a.ts", "export function save() {}"),
+            ("src/b.ts", "export function save() {}"),
+            ("src/svc.ts", "export function go() { save(); }"),
+        ]);
+        let n = built.edges.iter().filter(|e| e.relation == EdgeRelation::Calls && e.dst.ends_with(".save")).count();
+        assert_eq!(n, 0, "ambiguous without evidence must drop");
+    }
+
     #[test]
     fn every_call_edge_carries_a_justification_tag() {
         // Proof-obligation invariant (docs/RESOLUTION.md): no CALLS edge without a
@@ -468,7 +593,7 @@ mod tests {
             let tag = e.metadata.get("justification").and_then(|v| v.as_str());
             assert!(tag.is_some(), "CALLS edge {}->{} has no justification tag", e.src, e.dst);
             assert!(
-                ["SelfThisMember", "FieldTypeMember", "SameFileUnique", "GlobalUnique"].contains(&tag.unwrap()),
+                ["SelfThisMember", "FieldTypeMember", "LocalVarType", "SameFileUnique", "ImportNarrowed", "PackageScope", "GlobalUnique"].contains(&tag.unwrap()),
                 "unexpected justification tag: {:?}",
                 tag
             );
@@ -601,7 +726,7 @@ mod tests {
             "p", "a.ts",
             "interface Repo {}\nclass SqlRepo implements Repo {}\nclass MemRepo implements Repo {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Implements));
         let he = built.hyperedges.iter().find(|(h, _)| h.label.contains("Repo")).expect("hyperedge");
         // 2 implementers + the interface = 3 members
@@ -611,7 +736,7 @@ mod tests {
     #[test]
     fn end_to_end_persist_and_query() {
         let pf = codegraph_parse::parse_rust("proj", "src/main.rs", "fn helper() {}\nfn main() { helper(); }\n");
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
         let store = Store::open_in_memory().unwrap();
         for n in &pf.nodes {
             store.upsert_node(n).unwrap();
@@ -631,7 +756,7 @@ mod tests {
         let other = codegraph_parse::parse_rust("proj", "b.rs", "fn ghost() {}\n");
         pf.nodes.extend(other.nodes);
         pf.calls.extend(other.calls);
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
         assert!(built.edges.iter().any(|e| e.relation == EdgeRelation::Calls
             && e.src.ends_with(".main") && e.dst.ends_with(".ghost")));
     }
@@ -645,7 +770,7 @@ mod tests {
         a.nodes.extend(b.nodes);
         a.nodes.extend(c.nodes);
         a.calls.extend(c.calls);
-        let built = build(&a.nodes, &a.calls, &a.inherits, &a.fields, &a.locals);
+        let built = build(&a.nodes, &a.calls, &a.inherits, &a.fields, &a.locals, &a.imports);
         assert!(!built.edges.iter().any(|e| e.relation == EdgeRelation::Calls));
     }
 }
@@ -1012,7 +1137,7 @@ mod traversal_tests {
             "src/lib.rs",
             "fn a() { b(); }\nfn b() { c(); }\nfn c() {}\nfn lonely() {}\n",
         );
-        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals);
+        let built = build(&pf.nodes, &pf.calls, &pf.inherits, &pf.fields, &pf.locals, &pf.imports);
         (pf.nodes, built.edges)
     }
 
