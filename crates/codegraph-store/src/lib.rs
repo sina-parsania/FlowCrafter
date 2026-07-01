@@ -371,8 +371,18 @@ impl Store {
         Ok(n as usize)
     }
 
-    /// Is `name` called from any test-looking file? (test gap signal for `changes`.)
+    /// Is `name` covered by a test? Prefers RESOLVED Tests edges; falls back to
+    /// textual call sites in test-looking files (covers unresolved calls).
     pub fn has_test_reference(&self, name: &str) -> Result<bool> {
+        let via_edge: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id = e.dst
+             WHERE e.relation = 'Tests' AND n.name = ?1",
+            [name],
+            |r| r.get(0),
+        )?;
+        if via_edge > 0 {
+            return Ok(true);
+        }
         let n: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM calls WHERE callee_name = ?1
              AND (file_path LIKE '%test%' OR file_path LIKE '%spec%' OR file_path LIKE '%Tests%')",

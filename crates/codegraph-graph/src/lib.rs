@@ -102,6 +102,13 @@ fn join_normalize(dir: &str, module: &str) -> String {
     parts.join("/")
 }
 
+
+/// Test-file heuristic shared by TESTS-edge emission (kept conservative).
+fn is_test_path(p: &str) -> bool {
+    let lp = p.to_ascii_lowercase();
+    lp.contains("test") || lp.contains("spec") || lp.contains("__tests__")
+}
+
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 
 /// Directed graph of node-id → node-id, edge weight = relation name.
@@ -321,8 +328,22 @@ pub fn build(
                 confidence: Confidence::Inferred,
                 src_file: caller.file_path.clone(),
                 src_line: c.line,
-                metadata,
+                metadata: metadata.clone(),
             });
+            // First-class TESTS edge: a RESOLVED call from a test file covers the
+            // callee (projection of Calls — same precision, no extra guessing).
+            if is_test_path(&caller.file_path) {
+                push_edge(&mut edges, &mut seen, Edge {
+                    src: c.caller_id.clone(),
+                    dst: callee_id.to_string(),
+                    relation: EdgeRelation::Tests,
+                    tier: ResolutionTier::TreeSitter,
+                    confidence: Confidence::Inferred,
+                    src_file: caller.file_path.clone(),
+                    src_line: c.line,
+                    metadata,
+                });
+            }
         }
     }
 
