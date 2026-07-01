@@ -300,12 +300,26 @@ pub fn index_dir(root: &Path, db: &Path, full: bool, scip: Option<&Path>, indexs
     // Community + centrality over the full graph, persisted onto each node.
     let lg = LoadedGraph::load(&nodes, &edges);
     let analytics = lg.analyze();
+    // fan_in/fan_out over resolved CALLS edges -> node metadata (with complexity
+    // from parse, gives agents per-node risk signals for free).
+    let mut fan_in: HashMap<String, u32> = HashMap::new();
+    let mut fan_out: HashMap<String, u32> = HashMap::new();
+    for e in edges.iter().filter(|e| e.relation == EdgeRelation::Calls) {
+        *fan_out.entry(e.src.clone()).or_insert(0) += 1;
+        *fan_in.entry(e.dst.clone()).or_insert(0) += 1;
+    }
     let mut nodes = nodes;
     for nd in nodes.iter_mut() {
         if let Some(&(c, pr, bw)) = analytics.get(&nd.id) {
             nd.community = Some(c);
             nd.pagerank = pr;
             nd.betweenness = bw;
+        }
+        if let Some(&fi) = fan_in.get(&nd.id) {
+            nd.metadata.insert("fan_in".into(), serde_json::json!(fi));
+        }
+        if let Some(&fo) = fan_out.get(&nd.id) {
+            nd.metadata.insert("fan_out".into(), serde_json::json!(fo));
         }
     }
     store.bulk_upsert_nodes(&nodes)?;

@@ -341,6 +341,10 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                     NodeLabel::Class | NodeLabel::Interface | NodeLabel::Enum => my_class_id = Some(id.clone()),
                     _ => {}
                 }
+                let mut metadata = Metadata::new();
+                if matches!(label, NodeLabel::Function | NodeLabel::Method) {
+                    metadata.insert("complexity".into(), serde_json::json!(cyclomatic(node)));
+                }
                 nodes.push(Node {
                     id,
                     label,
@@ -349,7 +353,7 @@ fn collect(node: TsNode, src: &[u8], ctx: &Ctx, current_fn: Option<&str>, this_c
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
                     language: ctx.spec.name.to_string(),
-                    metadata: Metadata::new(),
+                    metadata,
                     community: None,
                     pagerank: 0.0,
                     betweenness: 0.0,
@@ -624,6 +628,31 @@ fn ts_infer_locals(func: TsNode, src: &[u8], fn_id: &str, out: &mut Vec<RawLocal
             out.push(RawLocal { caller_id: fn_id.into(), var_name: name, type_name: t });
         }
     }
+}
+
+/// Cyclomatic complexity (lite): 1 + decision points in the function's subtree.
+/// Grammar-agnostic by node-kind name — an approximation, consistent across the
+/// 13 languages, good for ranking risk (not for exact McCabe compliance).
+fn cyclomatic(func: TsNode) -> u32 {
+    let mut n = 1u32;
+    let mut stack = vec![func];
+    while let Some(node) = stack.pop() {
+        let k = node.kind();
+        if k.contains("if_") || k.starts_with("if") && k.ends_with("statement")
+            || k.contains("for_") || k.contains("while")
+            || k.contains("case") || k.contains("catch")
+            || k.contains("guard_statement") || k.contains("conditional_expression")
+            || k.contains("ternary") || k == "match_arm" || k.contains("when_entry")
+            || k == "&&" || k == "||" || k == "elif_clause" || k.contains("except_clause")
+        {
+            n += 1;
+        }
+        let mut c = node.walk();
+        for ch in node.children(&mut c) {
+            stack.push(ch);
+        }
+    }
+    n
 }
 
 /// First named child of `n` with the given kind (indexing borrows the tree, not
